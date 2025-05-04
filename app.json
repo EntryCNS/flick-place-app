@@ -13,7 +13,9 @@
       "backgroundColor": "#ffffff",
       "resizeMode": "contain"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.flick.place"
@@ -24,7 +26,11 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.flick.place",
-      "softwareKeyboardLayoutMode": "pan"
+      "softwareKeyboardLayoutMode": "pan",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -47,6 +53,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "30c8a65b-a8a8-482f-a421-50358a549e83"
+      }
     }
   }
 }
