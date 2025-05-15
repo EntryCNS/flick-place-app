@@ -1,16 +1,16 @@
-import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import React, { useCallback, useEffect } from "react";
 import {
+  Image,
   SafeAreaView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-import { COLORS } from "../constants/colors";
-import { useCartStore } from "../stores/cart";
-import { usePaymentStore } from "../stores/payment";
+import { COLORS } from "@/constants/colors";
+import { useCartStore } from "@/stores/cart";
+import { usePaymentStore } from "@/stores/payment";
 
 export default function PaymentComplete() {
   const { getTotalAmount, clearCart } = useCartStore();
@@ -38,38 +38,36 @@ export default function PaymentComplete() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <View style={styles.headerCenterContent}>
-          <Text style={styles.headerTitle}>
-            <Text style={styles.flickText}>Flick</Text> Place
-          </Text>
-        </View>
+        <Text style={styles.headerTitle}>
+          <Text style={styles.brandText}>Flick</Text> Place
+        </Text>
       </View>
 
       <View style={styles.content}>
-        <View style={styles.successContainer}>
-          <View style={styles.successIconContainer}>
-            <Ionicons
-              name="checkmark-circle"
-              size={100}
-              color={COLORS.success500}
+        <View style={styles.completionCard}>
+          <View style={styles.checkIconContainer}>
+            <Image
+              source={require("@/assets/images/check-success.png")}
+              style={styles.checkIcon}
+              resizeMode="contain"
             />
           </View>
 
-          <Text style={styles.successTitle}>결제 완료</Text>
-          <Text style={styles.successMessage}>
-            주문이 성공적으로 완료되었습니다. 감사합니다!
+          <Text style={styles.completionTitle}>결제 완료</Text>
+          <Text style={styles.completionMessage}>
+            주문이 성공적으로 완료되었습니다
           </Text>
 
-          <View style={styles.orderInfoContainer}>
+          <View style={styles.orderSummary}>
             <View style={styles.orderInfoRow}>
-              <Text style={styles.orderInfoLabel}>결제 금액</Text>
-              <Text style={styles.orderInfoValue}>
+              <Text style={styles.infoLabel}>결제 금액</Text>
+              <Text style={styles.infoValue}>
                 {getTotalAmount().toLocaleString()}원
               </Text>
             </View>
             <View style={styles.orderInfoRow}>
-              <Text style={styles.orderInfoLabel}>결제 시간</Text>
-              <Text style={styles.orderInfoValue}>
+              <Text style={styles.infoLabel}>결제 시간</Text>
+              <Text style={styles.infoValue}>
                 {`${new Date().toLocaleTimeString("ko-KR", {
                   hour: "2-digit",
                   minute: "2-digit",
@@ -78,15 +76,14 @@ export default function PaymentComplete() {
             </View>
           </View>
 
-          <View style={styles.timerText}>
-            <Text style={styles.timerHint}>
-              10초 후 자동으로 화면이 전환됩니다
-            </Text>
-          </View>
+          <Text style={styles.redirectMessage}>
+            10초 후 자동으로 화면이 전환됩니다
+          </Text>
 
           <TouchableOpacity
             style={styles.returnButton}
             onPress={handleGoToMenu}
+            activeOpacity={0.7}
           >
             <Text style={styles.returnButtonText}>메뉴로 돌아가기</Text>
           </TouchableOpacity>
@@ -102,27 +99,19 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   header: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 24,
     paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-    backgroundColor: COLORS.white,
-  },
-  headerCenterContent: {
     alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.gray200,
+    backgroundColor: "#FFFFFF",
   },
   headerTitle: {
-    fontSize: 26,
-    fontWeight: "700",
-    color: COLORS.text,
-    letterSpacing: -0.5,
+    fontSize: 22,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
   },
-  flickText: {
+  brandText: {
     color: COLORS.primary500,
-    fontWeight: "700",
   },
   content: {
     flex: 1,
@@ -130,36 +119,41 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 20,
   },
-  successContainer: {
+  completionCard: {
     width: "60%",
-    maxWidth: 600,
+    maxWidth: 500,
     padding: 40,
-    borderRadius: 16,
-    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    backgroundColor: "#FFFFFF",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: COLORS.borderLight,
+    borderColor: COLORS.gray200,
   },
-  successIconContainer: {
-    marginBottom: 24,
+  checkIconContainer: {
+    marginBottom: 20,
   },
-  successTitle: {
-    fontSize: 32,
-    fontWeight: "700",
-    color: COLORS.text,
-    marginBottom: 16,
+  checkIcon: {
+    width: 100,
+    height: 100,
   },
-  successMessage: {
-    fontSize: 18,
-    color: COLORS.textSecondary,
+  completionTitle: {
+    fontSize: 28,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
+    marginBottom: 12,
+  },
+  completionMessage: {
+    fontSize: 16,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray600,
     textAlign: "center",
-    marginBottom: 40,
+    marginBottom: 32,
   },
-  orderInfoContainer: {
+  orderSummary: {
     width: "100%",
-    backgroundColor: COLORS.background,
-    borderRadius: 12,
-    padding: 24,
+    backgroundColor: COLORS.gray50,
+    borderRadius: 10,
+    padding: 20,
     marginBottom: 24,
   },
   orderInfoRow: {
@@ -167,37 +161,35 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderLight,
+    borderBottomColor: COLORS.gray100,
   },
-  orderInfoLabel: {
+  infoLabel: {
+    fontSize: 15,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray600,
+  },
+  infoValue: {
     fontSize: 16,
-    fontWeight: "500",
-    color: COLORS.textSecondary,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
   },
-  orderInfoValue: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: COLORS.text,
-  },
-  timerText: {
-    marginBottom: 24,
-  },
-  timerHint: {
+  redirectMessage: {
     fontSize: 14,
-    color: COLORS.textSecondary,
-    textAlign: "center",
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray500,
+    marginBottom: 24,
   },
   returnButton: {
     backgroundColor: COLORS.primary500,
-    paddingVertical: 16,
-    paddingHorizontal: 32,
-    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 10,
     width: "100%",
     alignItems: "center",
   },
   returnButtonText: {
-    color: COLORS.white,
+    color: "#FFFFFF",
     fontSize: 16,
-    fontWeight: "600",
+    fontFamily: "Pretendard-SemiBold",
   },
 });

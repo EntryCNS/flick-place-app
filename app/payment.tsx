@@ -4,24 +4,21 @@ import { router } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   FlatList,
-  KeyboardAvoidingView,
-  Platform,
   SafeAreaView,
-  ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import Toast from "react-native-toast-message";
-import { API_URL } from "../constants/api";
-import { COLORS } from "../constants/colors";
-import api from "../libs/api";
-import { useCartStore } from "../stores/cart";
-import { usePaymentStore } from "../stores/payment";
+import { API_URL } from "@/constants/api";
+import { COLORS } from "@/constants/colors";
+import api from "@/libs/api";
+import { useCartStore } from "@/stores/cart";
+import { usePaymentStore } from "@/stores/payment";
 
 interface CartItemType {
   id: number;
@@ -31,6 +28,13 @@ interface CartItemType {
 }
 
 type PaymentMethod = "QR_CODE" | "STUDENT_ID";
+
+const ERROR_MESSAGES: Record<string, string> = {
+  ORDER_NOT_FOUND: "주문을 찾을 수 없습니다",
+  ORDER_NOT_PENDING: "이미 처리된 주문입니다",
+  USER_NOT_FOUND: "등록되지 않은 학번입니다",
+  BOOTH_NOT_FOUND: "부스 정보를 찾을 수 없습니다",
+};
 
 export default function Payment() {
   const { items: cart, getTotalAmount, clearCart } = useCartStore();
@@ -51,15 +55,38 @@ export default function Payment() {
 
   const [selectedMethod, setSelectedMethod] =
     useState<PaymentMethod>("QR_CODE");
-  const [studentId, setStudentId] = useState<string>("");
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [studentId, setStudentId] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
 
+  const timerAnimValue = useRef(new Animated.Value(1)).current;
   const webSocketRef = useRef<WebSocket | null>(null);
-  const inputRef = useRef<TextInput>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const handleCancel = useCallback(async (): Promise<void> => {
+  // 타이머 애니메이션 (60초 미만일 때)
+  useEffect(() => {
+    if (timer <= 60) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(timerAnimValue, {
+            toValue: 0.6,
+            duration: 500,
+            useNativeDriver: true,
+          }),
+          Animated.timing(timerAnimValue, {
+            toValue: 1,
+            duration: 500,
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      timerAnimValue.setValue(1);
+    }
+  }, [timer <= 60]);
+
+  const handleCancel = useCallback(async () => {
     try {
       setIsSubmitting(true);
       if (orderId) {
@@ -68,12 +95,10 @@ export default function Payment() {
     } catch (error) {
       let message = "주문 취소 중 오류가 발생했습니다";
 
-      if (isAxiosError(error) && error.response) {
+      if (isAxiosError(error) && error.response?.data) {
         const errorData = error.response.data;
-        if (errorData?.code === "ORDER_NOT_FOUND") {
-          message = "주문을 찾을 수 없습니다";
-        } else if (errorData?.code === "ORDER_NOT_PENDING") {
-          message = "이미 처리된 주문입니다";
+        if (errorData?.code && ERROR_MESSAGES[errorData.code]) {
+          message = ERROR_MESSAGES[errorData.code];
         }
       }
 
@@ -90,10 +115,8 @@ export default function Payment() {
   }, [orderId, cancelPayment, clearCart]);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-
     if (isActive && timer > 0) {
-      interval = setInterval(decrementTimer, 1000) as unknown as NodeJS.Timeout;
+      intervalRef.current = setInterval(decrementTimer, 1000);
     } else if (timer <= 0) {
       handleCancel();
     }
@@ -103,9 +126,12 @@ export default function Payment() {
     }
 
     return () => {
-      if (interval) clearInterval(interval);
+      if (intervalRef.current !== null) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
     };
-  }, [isActive, timer, status, decrementTimer, handleCancel, clearCart]);
+  }, [isActive, timer, status, decrementTimer, handleCancel]);
 
   useEffect(() => {
     if (requestId) {
@@ -149,15 +175,18 @@ export default function Payment() {
       };
 
       return () => {
-        if (webSocketRef.current?.readyState !== WebSocket.CLOSED) {
-          webSocketRef.current?.close();
+        if (
+          webSocketRef.current &&
+          webSocketRef.current.readyState !== WebSocket.CLOSED
+        ) {
+          webSocketRef.current.close();
         }
       };
     }
   }, [requestId, setStatus, handleCancel]);
 
   useEffect(() => {
-    const createQrPaymentRequest = async (): Promise<void> => {
+    const createQrPaymentRequest = async () => {
       if (!orderId || requestCode) return;
 
       try {
@@ -181,14 +210,12 @@ export default function Payment() {
         let errorMsg = "결제 요청을 생성할 수 없습니다";
         let code = null;
 
-        if (isAxiosError(error) && error.response) {
+        if (isAxiosError(error) && error.response?.data) {
           const errorData = error.response.data;
           code = errorData?.code;
 
-          if (code === "ORDER_NOT_FOUND") {
-            errorMsg = "주문을 찾을 수 없습니다";
-          } else if (code === "ORDER_NOT_PENDING") {
-            errorMsg = "이미 처리된 주문입니다";
+          if (code && ERROR_MESSAGES[code]) {
+            errorMsg = ERROR_MESSAGES[code];
           }
         }
 
@@ -209,7 +236,7 @@ export default function Payment() {
   }, [selectedMethod, orderId, requestCode, setPaymentRequest]);
 
   const handleMethodChange = useCallback(
-    (method: PaymentMethod): void => {
+    (method: PaymentMethod) => {
       if (selectedMethod !== method) {
         setSelectedMethod(method);
         setErrorMessage(null);
@@ -217,21 +244,18 @@ export default function Payment() {
 
         if (method === "STUDENT_ID") {
           setStudentId("");
-          setTimeout(() => {
-            inputRef.current?.focus();
-          }, 100);
         }
       }
     },
     [selectedMethod]
   );
 
-  const validateStudentId = (id: string): boolean => {
+  const validateStudentId = useCallback((id: string): boolean => {
     if (id.length !== 4) return false;
 
-    const grade = parseInt(id[0]);
-    const room = parseInt(id[1]);
-    const number = parseInt(id.substring(2));
+    const grade = parseInt(id[0], 10);
+    const room = parseInt(id[1], 10);
+    const number = parseInt(id.substring(2), 10);
 
     return (
       grade >= 1 &&
@@ -241,9 +265,9 @@ export default function Payment() {
       number >= 1 &&
       number <= 99
     );
-  };
+  }, []);
 
-  const handleStudentIdSubmit = useCallback(async (): Promise<void> => {
+  const handleStudentIdSubmit = useCallback(async () => {
     if (!validateStudentId(studentId)) {
       Toast.show({
         type: "info",
@@ -281,18 +305,12 @@ export default function Payment() {
       let errorMsg = "결제 요청에 실패했습니다";
       let code = null;
 
-      if (isAxiosError(error) && error.response) {
+      if (isAxiosError(error) && error.response?.data) {
         const errorData = error.response.data;
         code = errorData?.code;
 
-        if (code === "USER_NOT_FOUND") {
-          errorMsg = "등록되지 않은 학번입니다";
-        } else if (code === "ORDER_NOT_FOUND") {
-          errorMsg = "주문을 찾을 수 없습니다";
-        } else if (code === "ORDER_NOT_PENDING") {
-          errorMsg = "이미 처리된 주문입니다";
-        } else if (code === "BOOTH_NOT_FOUND") {
-          errorMsg = "부스 정보를 찾을 수 없습니다";
+        if (code && ERROR_MESSAGES[code]) {
+          errorMsg = ERROR_MESSAGES[code];
         }
       }
 
@@ -305,7 +323,7 @@ export default function Payment() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [studentId, orderId, setPaymentRequest]);
+  }, [studentId, orderId, setPaymentRequest, validateStudentId]);
 
   const formatTime = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -334,9 +352,6 @@ export default function Payment() {
       setStudentId("");
       setErrorMessage(null);
       setErrorCode(null);
-      setTimeout(() => {
-        inputRef.current?.focus();
-      }, 100);
     }
   }, [selectedMethod, orderId, resetPayment, setPaymentRequest]);
 
@@ -350,299 +365,347 @@ export default function Payment() {
           <TouchableOpacity
             style={styles.actionButton}
             onPress={() => router.replace("/products")}
+            activeOpacity={0.7}
           >
             <Text style={styles.buttonText}>상품 목록으로 돌아가기</Text>
           </TouchableOpacity>
         );
       default:
         return (
-          <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={handleRetry}
+            activeOpacity={0.7}
+          >
             <Text style={styles.buttonText}>다시 시도</Text>
           </TouchableOpacity>
         );
     }
   }, [errorCode, handleRetry]);
 
+  const renderCartItem = useCallback(
+    ({ item }: { item: CartItemType }) => (
+      <View style={styles.orderItem}>
+        <Text style={styles.orderItemName} numberOfLines={1}>
+          {item.name}
+        </Text>
+        <View style={styles.orderItemDetails}>
+          <Text style={styles.orderItemQuantity}>{item.quantity}개</Text>
+          <Text style={styles.orderItemPrice}>
+            {(item.price * item.quantity).toLocaleString()}원
+          </Text>
+        </View>
+      </View>
+    ),
+    []
+  );
+
+  const handleKeypadPress = useCallback(
+    (value: string) => {
+      if (value === "delete") {
+        setStudentId((prev) => prev.slice(0, -1));
+      } else if (value === "clear") {
+        setStudentId("");
+      } else if (studentId.length < 4) {
+        setStudentId((prev) => prev + value);
+      }
+    },
+    [studentId]
+  );
+
+  const renderKeypad = () => {
+    const keys = [
+      ["1", "2", "3"],
+      ["4", "5", "6"],
+      ["7", "8", "9"],
+      ["clear", "0", "delete"],
+    ];
+
+    return (
+      <View style={styles.keypadContainer}>
+        {keys.map((row, rowIndex) => (
+          <View key={`row-${rowIndex}`} style={styles.keypadRow}>
+            {row.map((key) => (
+              <TouchableOpacity
+                key={`key-${key}`}
+                style={[
+                  styles.keypadButton,
+                  key === "delete" || key === "clear"
+                    ? styles.keypadActionButton
+                    : null,
+                ]}
+                onPress={() => handleKeypadPress(key)}
+                activeOpacity={0.6}
+              >
+                {key === "delete" ? (
+                  <Ionicons
+                    name="backspace-outline"
+                    size={22}
+                    color={COLORS.gray600}
+                  />
+                ) : key === "clear" ? (
+                  <Text style={styles.keypadActionText}>삭제</Text>
+                ) : (
+                  <Text style={styles.keypadButtonText}>{key}</Text>
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        ))}
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
+      {/* 헤더 */}
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.backButton}
           onPress={handleCancel}
           disabled={isSubmitting}
+          activeOpacity={0.7}
         >
-          <Ionicons name="chevron-back" size={24} color={COLORS.text} />
+          <Ionicons name="chevron-back" size={24} color={COLORS.gray800} />
           <Text style={styles.backButtonText}>돌아가기</Text>
         </TouchableOpacity>
 
         <Text style={styles.headerTitle}>
-          <Text style={styles.flickText}>Flick</Text> Place
+          <Text style={styles.brandText}>Flick</Text> Place
         </Text>
 
-        <View style={{ width: 80 }} />
+        <Animated.View
+          style={[styles.timerWrapper, { opacity: timerAnimValue }]}
+        >
+          <Ionicons
+            name="time-outline"
+            size={22}
+            color={timer <= 60 ? COLORS.danger500 : COLORS.gray700}
+          />
+          <Text style={[styles.timerText, timer <= 60 && styles.timerWarning]}>
+            {formatTime(timer)}
+          </Text>
+        </Animated.View>
       </View>
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        style={styles.keyboardAvoidingContainer}
-      >
-        <View style={styles.content}>
-          <View style={styles.leftPanel}>
-            <View style={styles.topContainer}>
-              <View style={styles.timerRow}>
-                <View style={styles.timerContainer}>
-                  <Ionicons
-                    name="time-outline"
-                    size={18}
-                    color={
-                      timer <= 60 ? COLORS.danger500 : COLORS.textSecondary
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.timerText,
-                      timer <= 60 && styles.timerWarning,
-                    ]}
-                  >
-                    {formatTime(timer)}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.tabContainer}>
-                <TouchableOpacity
-                  style={[
-                    styles.tab,
-                    selectedMethod === "QR_CODE" && styles.activeTab,
-                  ]}
-                  onPress={() => handleMethodChange("QR_CODE")}
-                  disabled={isSubmitting}
-                >
-                  <Ionicons
-                    name="qr-code-outline"
-                    size={24}
-                    color={
-                      selectedMethod === "QR_CODE"
-                        ? COLORS.primary500
-                        : COLORS.textSecondary
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.tabText,
-                      selectedMethod === "QR_CODE" && styles.activeTabText,
-                    ]}
-                  >
-                    QR 결제
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.tab,
-                    selectedMethod === "STUDENT_ID" && styles.activeTab,
-                  ]}
-                  onPress={() => handleMethodChange("STUDENT_ID")}
-                  disabled={isSubmitting}
-                >
-                  <Ionicons
-                    name="school-outline"
-                    size={24}
-                    color={
-                      selectedMethod === "STUDENT_ID"
-                        ? COLORS.primary500
-                        : COLORS.textSecondary
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.tabText,
-                      selectedMethod === "STUDENT_ID" && styles.activeTabText,
-                    ]}
-                  >
-                    학번 결제
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            <View style={styles.paymentContent}>
-              <ScrollView
-                contentContainerStyle={styles.scrollContent}
-                keyboardShouldPersistTaps="handled"
+      {/* 메인 콘텐츠 */}
+      <View style={styles.mainContent}>
+        {/* 왼쪽 패널: 결제 방법 */}
+        <View style={styles.leftPanel}>
+          <View style={styles.tabBar}>
+            <TouchableOpacity
+              style={[
+                styles.tab,
+                selectedMethod === "QR_CODE" && styles.activeTab,
+              ]}
+              onPress={() => handleMethodChange("QR_CODE")}
+              disabled={isSubmitting}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="qr-code-outline"
+                size={22}
+                color={
+                  selectedMethod === "QR_CODE"
+                    ? COLORS.primary500
+                    : COLORS.gray600
+                }
+              />
+              <Text
+                style={[
+                  styles.tabText,
+                  selectedMethod === "QR_CODE" && styles.activeTabText,
+                ]}
               >
-                {selectedMethod === "QR_CODE" ? (
-                  <View style={styles.contentCenter}>
-                    {isSubmitting || (!requestCode && !errorMessage) ? (
-                      <View style={styles.loadingContainer}>
-                        <ActivityIndicator
-                          size="large"
-                          color={COLORS.primary500}
-                        />
-                        <Text style={styles.loadingText}>
-                          QR 코드 생성 중...
-                        </Text>
-                      </View>
-                    ) : errorMessage ? (
-                      <View style={styles.errorContainer}>
-                        <Ionicons
-                          name="alert-circle-outline"
-                          size={48}
-                          color={COLORS.danger500}
-                        />
-                        <Text style={styles.errorText}>{errorMessage}</Text>
-                        {renderErrorAction()}
-                      </View>
-                    ) : (
-                      <View style={styles.qrContainer}>
-                        <View style={styles.qrCodeWrapper}>
-                          <QRCode
-                            value={requestCode || ""}
-                            size={200}
-                            color={COLORS.text}
-                            backgroundColor={COLORS.white}
-                          />
-                        </View>
-                        <Text style={styles.instructionText}>
-                          QR 코드를 스캔하여 결제를 완료해주세요
-                        </Text>
-                        <Text style={styles.statusText}>
-                          결제가 완료될 때까지 기다려주세요
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                ) : (
-                  <View style={styles.contentCenter}>
-                    {requestMethod === "STUDENT_ID" && requestCode ? (
-                      <View style={styles.studentIdStatusContainer}>
-                        <Ionicons
-                          name="checkmark-circle"
-                          size={48}
-                          color={COLORS.success500}
-                        />
-                        <Text style={styles.successText}>
-                          학번 결제가 요청되었습니다
-                        </Text>
-                        <Text style={styles.statusText}>
-                          결제가 완료될 때까지 기다려주세요
-                        </Text>
-                        <View style={styles.studentIdBadge}>
-                          <Text style={styles.studentIdText}>
-                            학번: {studentId}
-                          </Text>
-                        </View>
-                      </View>
-                    ) : errorMessage ? (
-                      <View style={styles.errorContainer}>
-                        <Ionicons
-                          name="alert-circle-outline"
-                          size={48}
-                          color={COLORS.danger500}
-                        />
-                        <Text style={styles.errorText}>{errorMessage}</Text>
-                        {renderErrorAction()}
-                      </View>
-                    ) : (
-                      <View style={styles.studentIdInputContainer}>
-                        <Text style={styles.instructionText}>
-                          4자리 학번을 입력해주세요
-                        </Text>
-                        <Text style={styles.studentIdHelperText}>
-                          예: 1학년 2반 3번 → 1203
-                        </Text>
-                        <TextInput
-                          ref={inputRef}
-                          style={styles.studentIdInput}
-                          placeholder="0000"
-                          value={studentId}
-                          onChangeText={(text) => {
-                            if (/^\d{0,4}$/.test(text)) {
-                              setStudentId(text);
-                            }
-                          }}
-                          keyboardType="number-pad"
-                          maxLength={4}
-                          editable={!isSubmitting}
-                          autoFocus
-                        />
-                        <TouchableOpacity
-                          style={[
-                            styles.submitButton,
-                            (!validateStudentId(studentId) || isSubmitting) &&
-                              styles.disabledButton,
-                          ]}
-                          onPress={handleStudentIdSubmit}
-                          disabled={
-                            !validateStudentId(studentId) || isSubmitting
-                          }
-                        >
-                          {isSubmitting ? (
-                            <ActivityIndicator
-                              size="small"
-                              color={COLORS.white}
-                            />
-                          ) : (
-                            <Text style={styles.buttonText}>결제 요청하기</Text>
-                          )}
-                        </TouchableOpacity>
-                      </View>
-                    )}
-                  </View>
-                )}
-              </ScrollView>
-            </View>
-
-            <View style={styles.footer}>
-              <Text style={styles.amountText}>
-                {getTotalAmount().toLocaleString()}원
+                QR 결제
               </Text>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={handleCancel}
-                disabled={isSubmitting}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.tab,
+                selectedMethod === "STUDENT_ID" && styles.activeTab,
+              ]}
+              onPress={() => handleMethodChange("STUDENT_ID")}
+              disabled={isSubmitting}
+              activeOpacity={0.7}
+            >
+              <Ionicons
+                name="school-outline"
+                size={22}
+                color={
+                  selectedMethod === "STUDENT_ID"
+                    ? COLORS.primary500
+                    : COLORS.gray600
+                }
+              />
+              <Text
+                style={[
+                  styles.tabText,
+                  selectedMethod === "STUDENT_ID" && styles.activeTabText,
+                ]}
               >
-                {isSubmitting ? (
-                  <ActivityIndicator size="small" color={COLORS.danger500} />
-                ) : (
-                  <Text style={styles.cancelButtonText}>결제 취소</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+                학번 결제
+              </Text>
+            </TouchableOpacity>
           </View>
 
-          <View style={styles.rightPanel}>
-            <Text style={styles.sectionTitle}>주문 내역</Text>
-
-            <FlatList
-              data={cart as CartItemType[]}
-              renderItem={({ item }) => (
-                <View style={styles.orderItem}>
-                  <Text style={styles.orderItemName} numberOfLines={1}>
-                    {item.name}
-                  </Text>
-                  <View style={styles.orderItemDetails}>
-                    <Text style={styles.orderItemQuantity}>
-                      {item.quantity}개
+          <View style={styles.paymentContent}>
+            {selectedMethod === "QR_CODE" ? (
+              <View style={styles.centerContentWrapper}>
+                {isSubmitting || (!requestCode && !errorMessage) ? (
+                  <View style={styles.centerContent}>
+                    <ActivityIndicator size="large" color={COLORS.primary500} />
+                    <Text style={styles.loadingText}>QR 코드 생성 중...</Text>
+                  </View>
+                ) : errorMessage ? (
+                  <View style={styles.centerContent}>
+                    <Ionicons
+                      name="alert-circle-outline"
+                      size={44}
+                      color={COLORS.danger500}
+                    />
+                    <Text style={styles.errorText}>{errorMessage}</Text>
+                    {renderErrorAction()}
+                  </View>
+                ) : (
+                  <View style={styles.centerContent}>
+                    <View style={styles.qrContainer}>
+                      <QRCode
+                        value={requestCode || ""}
+                        size={180}
+                        color="#000000"
+                        backgroundColor="#FFFFFF"
+                      />
+                    </View>
+                    <Text style={styles.instructionText}>
+                      QR 코드를 스캔하여 결제해 주세요
                     </Text>
-                    <Text style={styles.orderItemPrice}>
-                      {(item.price * item.quantity).toLocaleString()}원
+                    <Text style={styles.subText}>
+                      결제가 완료될 때까지 기다려주세요
                     </Text>
                   </View>
-                </View>
-              )}
-              keyExtractor={(item) => item.id.toString()}
-            />
+                )}
+              </View>
+            ) : (
+              <View style={styles.centerContentWrapper}>
+                {requestMethod === "STUDENT_ID" && requestCode ? (
+                  <View style={styles.centerContent}>
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={56}
+                      color={COLORS.success500}
+                    />
+                    <Text style={styles.successText}>
+                      학번 결제가 요청되었습니다
+                    </Text>
+                    <Text style={styles.subText}>
+                      결제가 완료될 때까지 기다려주세요
+                    </Text>
+                    <View style={styles.studentIdBadge}>
+                      <Text style={styles.studentIdBadgeText}>
+                        학번: {studentId}
+                      </Text>
+                    </View>
+                  </View>
+                ) : errorMessage ? (
+                  <View style={styles.centerContent}>
+                    <Ionicons
+                      name="alert-circle-outline"
+                      size={44}
+                      color={COLORS.danger500}
+                    />
+                    <Text style={styles.errorText}>{errorMessage}</Text>
+                    {renderErrorAction()}
+                  </View>
+                ) : (
+                  <View style={styles.centerContent}>
+                    <Text style={styles.instructionText}>
+                      4자리 학번을 입력해주세요
+                    </Text>
+                    <Text style={styles.subText}>예: 1학년 2반 3번 → 1203</Text>
 
-            <View style={styles.totalRow}>
-              <Text style={styles.totalLabel}>총 결제 금액</Text>
-              <Text style={styles.totalPrice}>
-                {getTotalAmount().toLocaleString()}원
-              </Text>
-            </View>
+                    <View style={styles.digitBoxContainer}>
+                      {[0, 1, 2, 3].map((index) => (
+                        <View
+                          key={`digit-${index}`}
+                          style={[
+                            styles.digitBox,
+                            index < studentId.length && styles.digitBoxFilled,
+                          ]}
+                        >
+                          {index < studentId.length && (
+                            <Text style={styles.digitText}>
+                              {studentId[index]}
+                            </Text>
+                          )}
+                        </View>
+                      ))}
+                    </View>
+
+                    {renderKeypad()}
+
+                    <TouchableOpacity
+                      style={[
+                        styles.submitButton,
+                        (!validateStudentId(studentId) || isSubmitting) &&
+                          styles.disabledButton,
+                      ]}
+                      onPress={handleStudentIdSubmit}
+                      disabled={!validateStudentId(studentId) || isSubmitting}
+                      activeOpacity={0.7}
+                    >
+                      {isSubmitting ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Text style={styles.buttonText}>결제 요청하기</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            )}
           </View>
         </View>
-      </KeyboardAvoidingView>
+
+        {/* 오른쪽 패널: 주문 내역 */}
+        <View style={styles.rightPanel}>
+          <View style={styles.orderHeader}>
+            <Text style={styles.orderHeaderText}>주문 내역</Text>
+          </View>
+
+          <FlatList
+            data={cart}
+            renderItem={renderCartItem}
+            keyExtractor={(item) => item.id.toString()}
+            style={styles.orderList}
+            contentContainerStyle={styles.orderListContent}
+            showsVerticalScrollIndicator={false}
+          />
+
+          <View style={styles.orderFooter}>
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>총 결제 금액</Text>
+              <Text style={styles.totalAmount}>
+                {getTotalAmount().toLocaleString()}원
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={handleCancel}
+              disabled={isSubmitting}
+              activeOpacity={0.7}
+            >
+              {isSubmitting ? (
+                <ActivityIndicator size="small" color={COLORS.danger500} />
+              ) : (
+                <Text style={styles.cancelText}>결제 취소</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
@@ -650,19 +713,17 @@ export default function Payment() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.white,
-  },
-  keyboardAvoidingContainer: {
-    flex: 1,
+    backgroundColor: COLORS.background,
   },
   header: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 24,
-    paddingVertical: 16,
+    justifyContent: "space-between",
+    backgroundColor: "#FFFFFF",
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    borderBottomColor: COLORS.gray200,
   },
   backButton: {
     flexDirection: "row",
@@ -670,323 +731,321 @@ const styles = StyleSheet.create({
   },
   backButtonText: {
     fontSize: 16,
-    fontWeight: "500",
-    color: COLORS.text,
-    marginLeft: 6,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray800,
+    marginLeft: 4,
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: "700",
-    color: COLORS.text,
+    fontSize: 20,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
   },
-  flickText: {
+  brandText: {
     color: COLORS.primary500,
   },
-  content: {
-    flex: 1,
-    flexDirection: "row",
-    backgroundColor: COLORS.background,
-    padding: 16,
-  },
-  leftPanel: {
-    flex: 6,
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: COLORS.borderLight,
-    marginRight: 12,
-    overflow: "hidden",
-    display: "flex",
-    flexDirection: "column",
-  },
-  topContainer: {
-    flexDirection: "column",
-  },
-  timerRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    padding: 16,
-    paddingBottom: 8,
-  },
-  timerContainer: {
+  timerWrapper: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: COLORS.gray100,
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 12,
+    borderRadius: 8,
   },
   timerText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: COLORS.textSecondary,
-    marginLeft: 6,
+    fontSize: 16,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray800,
+    marginLeft: 5,
   },
   timerWarning: {
     color: COLORS.danger500,
   },
-  tabContainer: {
+  mainContent: {
+    flex: 1,
+    flexDirection: "row",
+    padding: 16,
+    gap: 16,
+  },
+  leftPanel: {
+    flex: 3,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 10,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: COLORS.gray200,
+  },
+  tabBar: {
     flexDirection: "row",
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderLight,
+    borderBottomColor: COLORS.gray200,
   },
   tab: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 16,
-    borderBottomWidth: 3,
-    borderBottomColor: "transparent",
+    paddingVertical: 12,
+    gap: 8,
   },
   activeTab: {
-    borderBottomColor: COLORS.primary500,
     backgroundColor: COLORS.primary50,
+    borderBottomWidth: 2,
+    borderBottomColor: COLORS.primary500,
   },
   tabText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: COLORS.textSecondary,
-    marginLeft: 8,
+    fontSize: 15,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray600,
   },
   activeTabText: {
     color: COLORS.primary500,
+    fontFamily: "Pretendard-SemiBold",
   },
   paymentContent: {
     flex: 1,
   },
-  scrollContent: {
-    flexGrow: 1,
+  centerContentWrapper: {
+    flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
   },
-  contentCenter: {
+  centerContent: {
     alignItems: "center",
-    justifyContent: "center",
-    width: "100%",
-    minHeight: 300,
-  },
-  loadingContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: COLORS.textSecondary,
-    marginTop: 16,
+    paddingHorizontal: 16,
   },
   qrContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    width: "100%",
     padding: 16,
-  },
-  qrCodeWrapper: {
-    padding: 20,
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: COLORS.borderLight,
-    marginBottom: 24,
+    borderColor: COLORS.gray200,
+    marginBottom: 16,
   },
   instructionText: {
-    fontSize: 18,
-    color: COLORS.text,
-    marginBottom: 12,
-    textAlign: "center",
-    fontWeight: "600",
-  },
-  studentIdHelperText: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-    marginBottom: 24,
+    fontSize: 16,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
+    marginBottom: 6,
     textAlign: "center",
   },
-  statusText: {
+  loadingText: {
     fontSize: 15,
-    color: COLORS.textSecondary,
-    textAlign: "center",
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray700,
+    marginTop: 12,
   },
-  errorContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  successText: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: COLORS.text,
-    marginTop: 16,
-    marginBottom: 8,
+  subText: {
+    fontSize: 14,
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray600,
     textAlign: "center",
   },
   errorText: {
-    fontSize: 16,
+    fontSize: 15,
+    fontFamily: "Pretendard-Medium",
     color: COLORS.danger500,
     textAlign: "center",
-    marginVertical: 12,
-    maxWidth: 300,
-    lineHeight: 22,
+    marginVertical: 10,
+    marginHorizontal: 12,
   },
-  studentIdInputContainer: {
-    alignItems: "center",
-    width: "100%",
-    padding: 20,
-  },
-  studentIdStatusContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  studentIdInput: {
-    width: 200,
-    height: 60,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 12,
-    fontSize: 24,
-    fontWeight: "600",
-    textAlign: "center",
-    color: COLORS.text,
-    marginBottom: 32,
-    letterSpacing: 8,
-  },
-  submitButton: {
-    width: 220,
-    height: 52,
-    backgroundColor: COLORS.primary500,
-    borderRadius: 12,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  disabledButton: {
-    backgroundColor: COLORS.primary200,
-    opacity: 0.7,
-  },
-  retryButton: {
-    backgroundColor: COLORS.primary500,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    marginTop: 16,
-  },
-  actionButton: {
-    backgroundColor: COLORS.primary500,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    marginTop: 16,
-  },
-  buttonText: {
-    color: COLORS.white,
+  successText: {
     fontSize: 16,
-    fontWeight: "600",
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
+    marginTop: 12,
+    marginBottom: 6,
+    textAlign: "center",
   },
   studentIdBadge: {
-    backgroundColor: COLORS.primary100,
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    marginTop: 24,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.primary50,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 16,
   },
-  studentIdText: {
-    fontSize: 18,
-    fontWeight: "600",
+  studentIdBadgeText: {
+    fontSize: 16,
+    fontFamily: "Pretendard-SemiBold",
     color: COLORS.primary700,
   },
-  footer: {
-    borderTopWidth: 1,
-    borderTopColor: COLORS.borderLight,
-    padding: 20,
-    alignItems: "center",
+  digitBoxContainer: {
+    flexDirection: "row",
+    marginVertical: 16,
+    gap: 10,
   },
-  amountText: {
-    fontSize: 26,
-    fontWeight: "700",
-    color: COLORS.primary500,
-    marginBottom: 16,
-  },
-  cancelButton: {
-    width: "100%",
-    maxWidth: 400,
+  digitBox: {
+    width: 42,
     height: 52,
-    backgroundColor: COLORS.white,
-    borderRadius: 12,
+    borderBottomWidth: 2,
+    borderBottomColor: COLORS.gray300,
     justifyContent: "center",
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: COLORS.borderLight,
   },
-  cancelButtonText: {
-    color: COLORS.danger500,
-    fontSize: 16,
-    fontWeight: "600",
+  digitBoxFilled: {
+    borderBottomColor: COLORS.primary500,
+  },
+  digitText: {
+    fontSize: 26,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
+  },
+  keypadContainer: {
+    marginBottom: 16,
+  },
+  keypadRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    marginBottom: 8,
+    gap: 8,
+  },
+  keypadButton: {
+    width: 52,
+    height: 52,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: COLORS.gray50,
+    borderRadius: 8,
+  },
+  keypadActionButton: {
+    backgroundColor: COLORS.gray200,
+  },
+  keypadButtonText: {
+    fontSize: 20,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray900,
+  },
+  keypadActionText: {
+    fontSize: 12,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray700,
+  },
+  submitButton: {
+    width: 180,
+    height: 44,
+    backgroundColor: COLORS.primary500,
+    borderRadius: 8,
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 8,
+  },
+  disabledButton: {
+    backgroundColor: COLORS.gray300,
+    opacity: 0.8,
+  },
+  buttonText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontFamily: "Pretendard-SemiBold",
   },
   rightPanel: {
-    flex: 4,
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
+    flex: 2,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: COLORS.borderLight,
-    padding: 20,
+    borderColor: COLORS.gray200,
+    display: "flex",
+    flexDirection: "column",
   },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: COLORS.text,
-    marginBottom: 16,
+  orderHeader: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.gray200,
+  },
+  orderHeaderText: {
+    fontSize: 15,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray800,
+  },
+  orderList: {
+    flex: 1,
+  },
+  orderListContent: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   orderItem: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingVertical: 14,
+    paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderLight,
+    borderBottomColor: COLORS.gray100,
   },
   orderItemName: {
     flex: 1,
-    fontSize: 16,
-    fontWeight: "500",
-    color: COLORS.text,
-    marginRight: 12,
+    fontSize: 14,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray800,
+    marginRight: 8,
   },
   orderItemDetails: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 12,
   },
   orderItemQuantity: {
-    fontSize: 15,
-    color: COLORS.textSecondary,
-    marginRight: 16,
-    minWidth: 32,
+    fontSize: 14,
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray600,
     textAlign: "right",
+    minWidth: 30,
   },
   orderItemPrice: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: COLORS.text,
-    minWidth: 90,
+    fontSize: 14,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
     textAlign: "right",
+    minWidth: 70,
+  },
+  orderFooter: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.gray200,
   },
   totalRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
+    marginBottom: 12,
   },
   totalLabel: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: COLORS.text,
+    fontSize: 16,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray800,
   },
-  totalPrice: {
+  totalAmount: {
     fontSize: 20,
-    fontWeight: "700",
+    fontFamily: "Pretendard-Bold",
     color: COLORS.primary500,
+  },
+  cancelButton: {
+    height: 44,
+    backgroundColor: COLORS.gray50,
+    borderWidth: 1,
+    borderColor: COLORS.danger100,
+    borderRadius: 8,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  cancelText: {
+    fontSize: 15,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.danger500,
+  },
+  actionButton: {
+    backgroundColor: COLORS.primary500,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 12,
+  },
+  retryButton: {
+    backgroundColor: COLORS.primary500,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginTop: 12,
   },
 });
