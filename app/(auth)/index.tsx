@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Animated,
   BackHandler,
+  Dimensions,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -20,11 +21,13 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons, FontAwesome5 } from "@expo/vector-icons";
-
-interface JwtPayload {
-  accessToken: string;
-}
+import { Ionicons } from "@expo/vector-icons";
+import { useForm, Controller } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { useMutation } from "@tanstack/react-query";
+import { useCartStore } from "@/stores/cart";
+import { usePaymentStore } from "@/stores/payment";
 
 interface ErrorResponse {
   code: string;
@@ -32,7 +35,7 @@ interface ErrorResponse {
   message: string;
 }
 
-const ERROR_MESSAGES: Record<string, string> = {
+const ERROR_CODES: Record<string, string> = {
   BOOTH_NOT_FOUND: "등록된 부스가 아닙니다",
   BOOTH_NOT_APPROVED: "승인된 부스가 아닙니다",
   BOOTH_REJECTED: "거절된 부스입니다",
@@ -40,20 +43,114 @@ const ERROR_MESSAGES: Record<string, string> = {
   BOOTH_PASSWORD_NOT_MATCH: "비밀번호가 맞지 않습니다",
 };
 
-export default function LoginScreen() {
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [focusedInput, setFocusedInput] = useState("");
-  const [alertVisible, setAlertVisible] = useState(false);
-  const [alertMessage, setAlertMessage] = useState("");
+const loginSchema = z.object({
+  username: z.string().min(1, "아이디를 입력해주세요"),
+  password: z.string().min(1, "비밀번호를 입력해주세요"),
+});
 
-  const { login } = useAuthStore();
-  const isMounted = useRef(true);
+type LoginFormData = z.infer<typeof loginSchema>;
+
+export default function LoginScreen() {
+  const { signIn } = useAuthStore();
+  const { clearCart } = useCartStore();
+  const { resetPayment } = usePaymentStore();
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [dimensions, setDimensions] = useState(Dimensions.get("window"));
+
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(12)).current;
+  const errorFadeAnim = useRef(new Animated.Value(0)).current;
+  const buttonScaleAnim = useRef(new Animated.Value(1)).current;
+
+  const {
+    control,
+    handleSubmit,
+    formState: { errors },
+    setError,
+    clearErrors,
+    watch,
+    setFocus,
+  } = useForm<LoginFormData>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { username: "", password: "" },
+  });
+
+  const formValues = watch();
+
   const usernameRef = useRef<TextInput>(null);
   const passwordRef = useRef<TextInput>(null);
-  const alertOpacity = useRef(new Animated.Value(0)).current;
-  const alertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const subscription = Dimensions.addEventListener("change", ({ window }) => {
+      setDimensions(window);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const isLandscape = dimensions.width > dimensions.height;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 350,
+        useNativeDriver: true,
+      }),
+      Animated.timing(slideAnim, {
+        toValue: 0,
+        duration: 350,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [fadeAnim, slideAnim]);
+
+  useEffect(() => {
+    if (errors.root?.message) {
+      Animated.timing(errorFadeAnim, {
+        toValue: 1,
+        duration: 250,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      errorFadeAnim.setValue(0);
+    }
+  }, [errors.root?.message, errorFadeAnim]);
+
+  const loginMutation = useMutation({
+    mutationFn: async (data: LoginFormData) => {
+      const response = await axios.post(`${API_URL}/kiosks/login`, {
+        username: data.username.trim(),
+        password: data.password,
+      });
+      return response.data;
+    },
+    onSuccess: async (data) => {
+      if (data?.accessToken) {
+        await signIn(data.accessToken);
+        clearCart();
+        resetPayment();
+        router.replace("/products");
+      } else {
+        setError("root", { message: "로그인에 실패했습니다" });
+      }
+    },
+    onError: (error) => {
+      if (isAxiosError(error) && error.response?.data) {
+        const errorData = error.response.data as ErrorResponse;
+
+        if (errorData.code === "BOOTH_PASSWORD_NOT_MATCH") {
+          setError("password", { message: ERROR_CODES[errorData.code] });
+          setFocus("password");
+        } else if (errorData.code && errorData.code in ERROR_CODES) {
+          setError("root", { message: ERROR_CODES[errorData.code] });
+        } else {
+          setError("root", { message: "로그인에 실패했습니다" });
+        }
+      } else {
+        setError("root", { message: "연결에 실패했습니다" });
+      }
+    },
+  });
 
   useEffect(() => {
     const backHandler = BackHandler.addEventListener("hardwareBackPress", () =>
@@ -61,115 +158,58 @@ export default function LoginScreen() {
     );
 
     return () => {
-      isMounted.current = false;
       backHandler.remove();
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      const timerToClean = alertTimerRef.current;
-      if (timerToClean !== null) {
-        clearTimeout(timerToClean);
-      }
-    };
-  }, []);
-
-  const showAlert = useCallback(
-    (message: string) => {
-      if (!isMounted.current) return;
-
-      if (alertTimerRef.current !== null) {
-        clearTimeout(alertTimerRef.current);
-        alertTimerRef.current = null;
-      }
-
-      setAlertMessage(message);
-      setAlertVisible(true);
-
-      alertOpacity.setValue(0);
-
-      Animated.sequence([
-        Animated.timing(alertOpacity, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.delay(3000),
-        Animated.timing(alertOpacity, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        if (isMounted.current) {
-          setAlertVisible(false);
-        }
-      });
+  const onSubmit = useCallback(
+    (data: LoginFormData) => {
+      Keyboard.dismiss();
+      loginMutation.mutate(data);
     },
-    [alertOpacity]
+    [loginMutation]
   );
 
-  const handleCredentialLogin = useCallback(async () => {
-    if (!username || !password || isProcessing) return;
-
-    Keyboard.dismiss();
-
-    try {
-      setIsProcessing(true);
-
-      const response = await axios.post<JwtPayload>(`${API_URL}/kiosks/login`, {
-        username: username.trim(),
-        password,
-      });
-
-      if (!isMounted.current) return;
-
-      if (response.data?.accessToken) {
-        await login(response.data.accessToken);
-        router.replace("/products");
-      } else {
-        showAlert("로그인에 실패했습니다");
-      }
-    } catch (error) {
-      if (!isMounted.current) return;
-
-      let errorMessage = "로그인에 실패했습니다";
-
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data as ErrorResponse;
-        if (errorData.code && ERROR_MESSAGES[errorData.code]) {
-          errorMessage = ERROR_MESSAGES[errorData.code];
-        }
-      }
-
-      showAlert(errorMessage);
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [username, password, isProcessing, login, showAlert]);
-
-  const handleFocus = useCallback((input: string) => {
-    setFocusedInput(input);
-  }, []);
-
-  const handleBlur = useCallback(() => {
-    setFocusedInput("");
-  }, []);
-
-  const handleUsernameSubmit = useCallback(() => {
-    passwordRef.current?.focus();
-  }, []);
-
   const goToQrScanner = useCallback(() => {
-    if (isProcessing) return;
+    if (loginMutation.isPending) return;
     Keyboard.dismiss();
+    clearErrors();
     router.push("/(auth)/qr");
-  }, [isProcessing]);
+  }, [loginMutation.isPending, clearErrors]);
 
-  const dismissKeyboard = useCallback(() => {
-    Keyboard.dismiss();
+  const handleFieldFocus = useCallback((fieldName: string) => {
+    setFocusedField(fieldName);
   }, []);
+
+  const handleFieldBlur = useCallback(() => {
+    setFocusedField(null);
+  }, []);
+
+  const handlePressIn = useCallback(() => {
+    Animated.spring(buttonScaleAnim, {
+      toValue: 0.98,
+      friction: 5,
+      useNativeDriver: true,
+    }).start();
+  }, [buttonScaleAnim]);
+
+  const handlePressOut = useCallback(() => {
+    Animated.spring(buttonScaleAnim, {
+      toValue: 1,
+      friction: 5,
+      useNativeDriver: true,
+    }).start();
+  }, [buttonScaleAnim]);
+
+  const handleAutoFocus = useCallback(() => {
+    setTimeout(() => {
+      usernameRef.current?.focus();
+    }, 800);
+  }, []);
+
+  useEffect(() => {
+    handleAutoFocus();
+  }, [handleAutoFocus]);
 
   return (
     <KeyboardAvoidingView
@@ -177,116 +217,211 @@ export default function LoginScreen() {
       style={styles.container}
       keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
     >
-      <TouchableWithoutFeedback onPress={dismissKeyboard}>
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <SafeAreaView style={styles.safeArea}>
-          <View style={styles.logoContainer}>
+          <View style={styles.header}>
             <Image
               source={require("@/assets/images/logo.png")}
               style={styles.logo}
               resizeMode="contain"
-              accessibilityLabel="Flick Place Logo"
             />
-            <Text style={styles.appName}>
-              <Text style={styles.highlight}>F</Text>lick Place
+            <Text style={styles.headerTitle}>
+              <Text style={styles.brandText}>Flick</Text> Place
             </Text>
           </View>
 
           <View style={styles.mainContainer}>
-            <View style={styles.formContainer}>
+            <Animated.View
+              style={[
+                styles.content,
+                {
+                  opacity: fadeAnim,
+                  transform: [{ translateY: slideAnim }],
+                  width: isLandscape ? "50%" : "100%",
+                },
+              ]}
+            >
               <Text style={styles.title}>키오스크 로그인</Text>
 
-              <TextInput
-                ref={usernameRef}
-                style={[
-                  styles.input,
-                  focusedInput === "username" && styles.inputFocused,
-                ]}
-                placeholder="아이디"
-                placeholderTextColor={COLORS.gray400}
-                value={username}
-                onChangeText={setUsername}
-                onFocus={() => handleFocus("username")}
-                onBlur={handleBlur}
-                onSubmitEditing={handleUsernameSubmit}
-                returnKeyType="next"
-                autoCapitalize="none"
-                keyboardType="email-address"
-                blurOnSubmit={false}
-                autoCorrect={false}
-                importantForAutofill="yes"
-                accessibilityLabel="아이디 입력"
-              />
+              {errors.root?.message && (
+                <Animated.View
+                  style={[styles.errorBanner, { opacity: errorFadeAnim }]}
+                >
+                  <Ionicons
+                    name="alert-circle"
+                    size={18}
+                    color={COLORS.danger500}
+                    style={styles.errorIcon}
+                  />
+                  <Text style={styles.errorBannerText}>
+                    {errors.root.message}
+                  </Text>
+                </Animated.View>
+              )}
 
-              <TextInput
-                ref={passwordRef}
-                style={[
-                  styles.input,
-                  focusedInput === "password" && styles.inputFocused,
-                ]}
-                placeholder="비밀번호"
-                placeholderTextColor={COLORS.gray400}
-                value={password}
-                onChangeText={setPassword}
-                onFocus={() => handleFocus("password")}
-                onBlur={handleBlur}
-                onSubmitEditing={handleCredentialLogin}
-                returnKeyType="done"
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-                importantForAutofill="yes"
-                accessibilityLabel="비밀번호 입력"
-              />
-
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={[
-                  styles.loginButton,
-                  (!username || !password) && styles.loginButtonDisabled,
-                ]}
-                onPress={handleCredentialLogin}
-                disabled={!username || !password || isProcessing}
-                accessibilityLabel="로그인 버튼"
-                accessibilityRole="button"
-              >
-                {isProcessing ? (
-                  <ActivityIndicator color={COLORS.white} size="small" />
-                ) : (
-                  <Text style={styles.loginButtonText}>로그인</Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={styles.qrButton}
-                onPress={goToQrScanner}
-                disabled={isProcessing}
-                accessibilityLabel="QR 코드로 등록하기 버튼"
-                accessibilityRole="button"
-              >
-                <FontAwesome5
-                  name="qrcode"
-                  size={18}
-                  color={COLORS.primary600}
-                  style={styles.qrIcon}
+              <View style={styles.inputsContainer}>
+                <Controller
+                  control={control}
+                  name="username"
+                  render={({
+                    field: { onChange, onBlur, value, ref },
+                    fieldState: { error },
+                  }) => (
+                    <View style={styles.inputGroup}>
+                      <View style={styles.inputLabelRow}>
+                        <Text style={styles.inputLabel}>아이디</Text>
+                        {error?.message && (
+                          <Animated.Text
+                            style={[
+                              styles.errorText,
+                              { opacity: errorFadeAnim },
+                            ]}
+                          >
+                            {error.message}
+                          </Animated.Text>
+                        )}
+                      </View>
+                      <TextInput
+                        ref={(instance) => {
+                          ref(instance);
+                          usernameRef.current = instance;
+                        }}
+                        style={[
+                          styles.input,
+                          focusedField === "username" && styles.inputFocused,
+                          error && styles.inputError,
+                        ]}
+                        placeholder="아이디를 입력하세요"
+                        placeholderTextColor={COLORS.gray400}
+                        value={value}
+                        onChangeText={onChange}
+                        onBlur={() => {
+                          onBlur();
+                          handleFieldBlur();
+                        }}
+                        onFocus={() => handleFieldFocus("username")}
+                        onSubmitEditing={() => setFocus("password")}
+                        returnKeyType="next"
+                        autoCapitalize="none"
+                        blurOnSubmit={false}
+                      />
+                    </View>
+                  )}
                 />
-                <Text style={styles.qrButtonText}>QR 코드로 등록하기</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
 
-          {alertVisible && (
-            <Animated.View style={[styles.alert, { opacity: alertOpacity }]}>
-              <View style={styles.alertContent}>
-                <Ionicons
-                  name="alert-circle"
-                  size={24}
-                  color={COLORS.danger500}
+                <Controller
+                  control={control}
+                  name="password"
+                  render={({
+                    field: { onChange, onBlur, value, ref },
+                    fieldState: { error },
+                  }) => (
+                    <View style={styles.inputGroup}>
+                      <View style={styles.inputLabelRow}>
+                        <Text style={styles.inputLabel}>비밀번호</Text>
+                        {error?.message && (
+                          <Animated.Text
+                            style={[
+                              styles.errorText,
+                              { opacity: errorFadeAnim },
+                            ]}
+                          >
+                            {error.message}
+                          </Animated.Text>
+                        )}
+                      </View>
+                      <TextInput
+                        ref={(instance) => {
+                          ref(instance);
+                          passwordRef.current = instance;
+                        }}
+                        style={[
+                          styles.input,
+                          focusedField === "password" && styles.inputFocused,
+                          error && styles.inputError,
+                        ]}
+                        placeholder="비밀번호를 입력하세요"
+                        placeholderTextColor={COLORS.gray400}
+                        value={value}
+                        onChangeText={onChange}
+                        onBlur={() => {
+                          onBlur();
+                          handleFieldBlur();
+                        }}
+                        onFocus={() => handleFieldFocus("password")}
+                        onSubmitEditing={handleSubmit(onSubmit)}
+                        returnKeyType="done"
+                        secureTextEntry
+                        autoCapitalize="none"
+                      />
+                    </View>
+                  )}
                 />
-                <Text style={styles.alertText}>{alertMessage}</Text>
               </View>
+
+              <Animated.View
+                style={{
+                  transform: [{ scale: buttonScaleAnim }],
+                  width: "100%",
+                }}
+              >
+                <TouchableOpacity
+                  style={[
+                    styles.loginButton,
+                    (!formValues.username ||
+                      !formValues.password ||
+                      loginMutation.isPending) &&
+                      styles.buttonDisabled,
+                  ]}
+                  onPress={handleSubmit(onSubmit)}
+                  onPressIn={handlePressIn}
+                  onPressOut={handlePressOut}
+                  disabled={
+                    !formValues.username ||
+                    !formValues.password ||
+                    loginMutation.isPending
+                  }
+                  activeOpacity={0.9}
+                >
+                  {loginMutation.isPending ? (
+                    <ActivityIndicator color="#FFFFFF" size="small" />
+                  ) : (
+                    <Text style={styles.buttonText}>로그인</Text>
+                  )}
+                </TouchableOpacity>
+              </Animated.View>
+
+              <View style={styles.divider}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>또는</Text>
+                <View style={styles.dividerLine} />
+              </View>
+
+              <Animated.View
+                style={{
+                  transform: [{ scale: buttonScaleAnim }],
+                  width: "100%",
+                }}
+              >
+                <TouchableOpacity
+                  style={styles.qrButton}
+                  onPress={goToQrScanner}
+                  onPressIn={handlePressIn}
+                  onPressOut={handlePressOut}
+                  disabled={loginMutation.isPending}
+                  activeOpacity={0.9}
+                >
+                  <Ionicons
+                    name="qr-code-outline"
+                    size={22}
+                    color={COLORS.primary500}
+                    style={styles.qrIcon}
+                  />
+                  <Text style={styles.qrButtonText}>QR 코드로 등록하기</Text>
+                </TouchableOpacity>
+              </Animated.View>
             </Animated.View>
-          )}
+          </View>
         </SafeAreaView>
       </TouchableWithoutFeedback>
     </KeyboardAvoidingView>
@@ -300,127 +435,155 @@ const styles = StyleSheet.create({
   },
   safeArea: {
     flex: 1,
-    backgroundColor: COLORS.white,
   },
-  logoContainer: {
+  header: {
     flexDirection: "row",
     alignItems: "center",
-    padding: 20,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.gray100,
+    height: 64,
   },
   logo: {
-    width: 40,
-    height: 40,
-    marginRight: 8,
+    width: 36,
+    height: 36,
+    marginRight: 12,
   },
-  appName: {
+  headerTitle: {
     fontSize: 22,
-    fontFamily: "Pretendard-SemiBold",
-    color: COLORS.text,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
   },
-  highlight: {
-    color: COLORS.primary600,
+  brandText: {
+    color: COLORS.primary500,
   },
   mainContainer: {
     flex: 1,
-    justifyContent: "center",
     alignItems: "center",
-    padding: 20,
+    justifyContent: "center",
   },
-  formContainer: {
-    width: "100%",
-    maxWidth: 500,
+  content: {
+    paddingHorizontal: 24,
+    paddingVertical: 32,
+    maxWidth: 480,
+    alignSelf: "center",
   },
   title: {
     fontSize: 28,
     fontFamily: "Pretendard-Bold",
-    color: COLORS.text,
-    marginBottom: 24,
+    color: COLORS.gray900,
+    marginBottom: 28,
     textAlign: "center",
   },
-  input: {
-    backgroundColor: COLORS.gray100,
-    height: 56,
-    borderRadius: 12,
-    paddingHorizontal: 20,
-    fontSize: 16,
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.danger50,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: COLORS.danger100,
+  },
+  errorIcon: {
+    marginRight: 8,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontSize: 15,
     fontFamily: "Pretendard-Medium",
-    color: COLORS.text,
-    marginBottom: 16,
+    color: COLORS.danger600,
+  },
+  inputsContainer: {
+    marginBottom: 24,
+  },
+  inputGroup: {
+    marginBottom: 20,
+  },
+  inputLabelRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  inputLabel: {
+    fontSize: 15,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray700,
+  },
+  input: {
+    height: 56,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    fontSize: 16,
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray900,
+    backgroundColor: COLORS.gray50,
+    borderWidth: 1,
+    borderColor: COLORS.gray200,
   },
   inputFocused: {
-    borderWidth: 1,
-    borderColor: COLORS.primary600,
+    borderColor: COLORS.primary500,
+    backgroundColor: COLORS.white,
+    borderWidth: 2,
+  },
+  inputError: {
+    borderColor: COLORS.danger500,
+  },
+  errorText: {
+    fontSize: 14,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.danger500,
   },
   loginButton: {
-    backgroundColor: COLORS.primary600,
     height: 56,
-    borderRadius: 12,
+    borderRadius: 8,
     justifyContent: "center",
     alignItems: "center",
-    marginTop: 8,
-    marginBottom: 16,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 1.5,
+    backgroundColor: COLORS.primary500,
   },
-  loginButtonDisabled: {
+  buttonDisabled: {
     backgroundColor: COLORS.gray300,
-    elevation: 0,
-    shadowOpacity: 0,
   },
-  loginButtonText: {
+  buttonText: {
     color: COLORS.white,
     fontSize: 16,
     fontFamily: "Pretendard-SemiBold",
   },
-  qrButton: {
+  divider: {
     flexDirection: "row",
-    backgroundColor: COLORS.white,
+    alignItems: "center",
+    marginVertical: 24,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLORS.gray200,
+  },
+  dividerText: {
+    marginHorizontal: 16,
+    fontSize: 15,
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray500,
+  },
+  qrButton: {
     height: 56,
-    borderRadius: 12,
+    borderRadius: 8,
+    flexDirection: "row",
     justifyContent: "center",
     alignItems: "center",
+    backgroundColor: COLORS.white,
     borderWidth: 1,
-    borderColor: COLORS.primary600,
+    borderColor: COLORS.primary500,
   },
   qrIcon: {
-    marginRight: 8,
+    marginRight: 10,
   },
   qrButtonText: {
-    color: COLORS.primary600,
+    color: COLORS.primary500,
     fontSize: 16,
     fontFamily: "Pretendard-SemiBold",
-  },
-  alert: {
-    position: "absolute",
-    top: 60,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-    paddingHorizontal: 16,
-    zIndex: 1000,
-  },
-  alertContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: COLORS.white,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderRadius: 12,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-    maxWidth: 500,
-  },
-  alertText: {
-    marginLeft: 12,
-    fontSize: 16,
-    fontFamily: "Pretendard-Medium",
-    color: COLORS.text,
-    flex: 1,
   },
 });

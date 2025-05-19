@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,11 +17,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { COLORS } from "@/constants/colors";
 import { API_URL } from "@/constants/api";
-import { isAxiosError } from "axios";
+import axios, { isAxiosError } from "axios";
 import { useAuthStore } from "@/stores/auth";
 import { useCartStore } from "@/stores/cart";
 import { usePaymentStore } from "@/stores/payment";
 import api from "@/libs/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 interface ProductResponse {
   id: number;
@@ -52,25 +53,21 @@ interface CreateOrderRequest {
   items: CreateOrderItemRequest[];
 }
 
-const ERROR_MESSAGES: Record<string, string> = {
+const ERROR_CODES: Record<string, string> = {
   INSUFFICIENT_STOCK: "재고가 부족합니다",
   PRODUCT_NOT_FOUND: "일부 상품이 판매 불가능합니다",
   PRODUCT_UNAVAILABLE: "판매 중단된 상품이 포함되어 있습니다",
 };
 
 export default function ProductsScreen() {
-  const [, setSecretTapCount] = useState(0);
-  const [products, setProducts] = useState<ProductResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
+  const [secretTapCount, setSecretTapCount] = useState(0);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertMessage, setAlertMessage] = useState("");
   const alertOpacity = useRef(new Animated.Value(0)).current;
-  const alertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alertTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { logout } = useAuthStore();
+  const queryClient = useQueryClient();
+  const { signOut } = useAuthStore();
   const {
     items: cart,
     addItem,
@@ -81,18 +78,58 @@ export default function ProductsScreen() {
   } = useCartStore();
   const { createPayment } = usePaymentStore();
 
-  useEffect(() => {
-    return () => {
-      const timerToClean = alertTimerRef.current;
-      if (timerToClean !== null) {
-        clearTimeout(timerToClean);
+  const {
+    data: products = [],
+    isLoading,
+    isError,
+    refetch,
+    isRefetching,
+  } = useQuery({
+    queryKey: ["products"],
+    queryFn: async () => {
+      const response = await api.get<ProductResponse[]>(
+        `${API_URL}/products/available`
+      );
+      return response.data;
+    },
+    staleTime: 1000 * 60 * 5,
+    retry: 2,
+  });
+
+  const orderMutation = useMutation({
+    mutationFn: (orderRequest: CreateOrderRequest) => {
+      return axios.post(`${API_URL}/orders`, orderRequest, {
+        headers: {
+          Authorization: `Bearer ${useAuthStore.getState().token}`,
+        },
+      });
+    },
+    onSuccess: (response) => {
+      if (response.data?.id) {
+        createPayment(response.data.id);
+        router.navigate("/payment");
+      } else {
+        throw new Error("주문 생성 실패");
       }
-    };
-  }, []);
+    },
+    onError: (error) => {
+      let errorMessage = "주문 처리에 실패했습니다";
+
+      if (isAxiosError(error) && error.response?.data) {
+        const errorData = error.response.data;
+        if (errorData?.code && ERROR_CODES[errorData.code]) {
+          errorMessage = ERROR_CODES[errorData.code];
+        }
+      }
+
+      showAlert(errorMessage);
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+    },
+  });
 
   const showAlert = useCallback(
     (message: string) => {
-      if (alertTimerRef.current !== null) {
+      if (alertTimerRef.current) {
         clearTimeout(alertTimerRef.current);
         alertTimerRef.current = null;
       }
@@ -105,13 +142,13 @@ export default function ProductsScreen() {
       Animated.sequence([
         Animated.timing(alertOpacity, {
           toValue: 1,
-          duration: 300,
+          duration: 200,
           useNativeDriver: true,
         }),
         Animated.delay(3000),
         Animated.timing(alertOpacity, {
           toValue: 0,
-          duration: 300,
+          duration: 200,
           useNativeDriver: true,
         }),
       ]).start(() => {
@@ -121,100 +158,50 @@ export default function ProductsScreen() {
     [alertOpacity]
   );
 
-  const fetchProducts = useCallback(async (showLoader = true) => {
-    if (showLoader) {
-      setLoading(true);
-    }
-
-    try {
-      const response = await api.get<ProductResponse[]>(
-        `${API_URL}/products/available`
-      );
-      setProducts(response.data);
-      setError(null);
-    } catch {
-      setError("상품을 불러올 수 없습니다");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchProducts();
-  }, [fetchProducts]);
-
-  const handleRefresh = useCallback(() => {
-    setRefreshing(true);
-    fetchProducts(false);
-  }, [fetchProducts]);
-
   const handleSecretTap = useCallback(() => {
-    setSecretTapCount((prev) => {
-      const newCount = prev + 1;
-      if (newCount >= 7) {
-        Alert.alert(
-          "키오스크 연결 해제",
-          "이 키오스크의 연결을 해제하시겠습니까?",
-          [
-            {
-              text: "취소",
-              style: "cancel",
-              onPress: () => setSecretTapCount(0),
-            },
-            {
-              text: "연결 해제",
-              style: "destructive",
-              onPress: () => {
-                logout();
-                clearCart();
-                router.replace("/(auth)");
-              },
-            },
-          ]
-        );
-        return 0;
-      }
-      return newCount;
-    });
-  }, [logout, clearCart]);
+    const newCount = secretTapCount + 1;
+    setSecretTapCount(newCount);
 
-  const handlePayment = useCallback(async () => {
+    if (newCount >= 7) {
+      Alert.alert(
+        "키오스크 연결 해제",
+        "이 키오스크의 연결을 해제하시겠습니까?",
+        [
+          {
+            text: "취소",
+            style: "cancel",
+            onPress: () => setSecretTapCount(0),
+          },
+          {
+            text: "연결 해제",
+            style: "destructive",
+            onPress: () => {
+              signOut();
+              clearCart();
+              router.replace("/(auth)");
+            },
+          },
+        ]
+      );
+      setSecretTapCount(0);
+    }
+  }, [secretTapCount, signOut, clearCart]);
+
+  const handlePayment = useCallback(() => {
     if (cart.length === 0) {
       showAlert("상품을 선택해주세요");
       return;
     }
 
-    try {
-      const orderRequest: CreateOrderRequest = {
-        items: cart.map((item) => ({
-          productId: item.id,
-          quantity: item.quantity,
-        })),
-      };
+    const orderRequest: CreateOrderRequest = {
+      items: cart.map((item) => ({
+        productId: item.id,
+        quantity: item.quantity,
+      })),
+    };
 
-      const response = await api.post(`${API_URL}/orders`, orderRequest);
-
-      if (response.data?.id) {
-        createPayment(response.data.id);
-        router.navigate("/payment");
-      } else {
-        throw new Error("주문 생성 실패");
-      }
-    } catch (error) {
-      let errorMessage = "주문 처리에 실패했습니다";
-
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        if (errorData?.code && ERROR_MESSAGES[errorData.code]) {
-          errorMessage = ERROR_MESSAGES[errorData.code];
-        }
-      }
-
-      showAlert(errorMessage);
-      fetchProducts(false);
-    }
-  }, [cart, createPayment, fetchProducts, showAlert]);
+    orderMutation.mutate(orderRequest);
+  }, [cart, orderMutation, showAlert]);
 
   const handleAddToCart = useCallback(
     (product: ProductResponse) => {
@@ -400,22 +387,22 @@ export default function ProductsScreen() {
 
       <View style={styles.contentContainer}>
         <View style={styles.productContainer}>
-          {loading && !refreshing ? (
+          {isLoading && !isRefetching ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color={COLORS.primary600} />
               <Text style={styles.loadingText}>상품을 불러오는 중...</Text>
             </View>
-          ) : error ? (
+          ) : isError ? (
             <View style={styles.errorContainer}>
               <Ionicons
                 name="alert-circle-outline"
                 size={48}
                 color={COLORS.danger500}
               />
-              <Text style={styles.errorText}>{error}</Text>
+              <Text style={styles.errorText}>상품을 불러올 수 없습니다</Text>
               <TouchableOpacity
                 style={styles.retryButton}
-                onPress={() => fetchProducts()}
+                onPress={() => refetch()}
                 activeOpacity={0.7}
               >
                 <Text style={styles.retryButtonText}>다시 시도</Text>
@@ -431,8 +418,8 @@ export default function ProductsScreen() {
               showsVerticalScrollIndicator={false}
               refreshControl={
                 <RefreshControl
-                  refreshing={refreshing}
-                  onRefresh={handleRefresh}
+                  refreshing={isRefetching}
+                  onRefresh={() => refetch()}
                   colors={[COLORS.primary600]}
                   tintColor={COLORS.primary600}
                 />
@@ -502,19 +489,26 @@ export default function ProductsScreen() {
             <TouchableOpacity
               style={[
                 styles.paymentButton,
-                cart.length === 0 && styles.paymentButtonDisabled,
+                (cart.length === 0 || orderMutation.isPending) &&
+                  styles.paymentButtonDisabled,
               ]}
               onPress={handlePayment}
               activeOpacity={0.7}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || orderMutation.isPending}
             >
-              <Ionicons
-                name="card-outline"
-                size={20}
-                color={COLORS.white}
-                style={{ marginRight: 8 }}
-              />
-              <Text style={styles.paymentButtonText}>결제하기</Text>
+              {orderMutation.isPending ? (
+                <ActivityIndicator size="small" color={COLORS.white} />
+              ) : (
+                <>
+                  <Ionicons
+                    name="card-outline"
+                    size={20}
+                    color={COLORS.white}
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text style={styles.paymentButtonText}>결제하기</Text>
+                </>
+              )}
             </TouchableOpacity>
           </View>
         </View>

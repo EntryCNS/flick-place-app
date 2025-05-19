@@ -1,18 +1,18 @@
 import { COLORS } from "@/constants/colors";
 import { API_URL } from "@/constants/api";
 import { useAuthStore } from "@/stores/auth";
-import axios, { isAxiosError } from "axios";
+import axios from "axios";
 import {
   BarcodeScanningResult,
   CameraView,
   useCameraPermissions,
 } from "expo-camera";
 import { router } from "expo-router";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import {
   ActivityIndicator,
-  Animated,
   BackHandler,
+  StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -20,172 +20,95 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useMutation } from "@tanstack/react-query";
 
-interface JwtPayload {
+interface QRRegistrationResponse {
   accessToken: string;
 }
 
-interface ErrorResponse {
-  code: string;
-  status: number;
-  message: string;
-}
-
-const ERROR_MESSAGES: Record<string, string> = {
-  BOOTH_NOT_FOUND: "부스를 찾을 수 없습니다",
-  BOOTH_NOT_APPROVED: "승인된 부스가 아닙니다",
-  BOOTH_REJECTED: "거절된 부스입니다",
-  BOOTH_INACTIVE: "금지된 부스입니다",
-};
-
 export default function QrScannerScreen() {
-  const [isProcessing, setIsProcessing] = useState(false);
+  const { signIn } = useAuthStore();
   const [permission, requestPermission] = useCameraPermissions();
-  const { login } = useAuthStore();
-  const isMounted = useRef(true);
-  const hasScanned = useRef(false);
 
-  const [alertVisible, setAlertVisible] = useState(false);
-  const [alertMessage, setAlertMessage] = useState("");
-  const alertOpacity = useRef(new Animated.Value(0)).current;
-  const alertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMounted = useRef(true);
+  const canScan = useRef(true);
+
+  const registerMutation = useMutation({
+    mutationFn: async (token: string) => {
+      const response = await axios.post<QRRegistrationResponse>(
+        `${API_URL}/kiosks/register`,
+        { registrationToken: token },
+        { timeout: 10000 }
+      );
+      return response.data;
+    },
+    onSuccess: async (data) => {
+      if (!isMounted.current) return;
+
+      if (data?.accessToken) {
+        await signIn(data.accessToken);
+        router.replace("/products");
+      } else {
+        resetScanState();
+      }
+    },
+    onError: () => {
+      if (isMounted.current) {
+        resetScanState();
+      }
+    },
+  });
 
   useEffect(() => {
-    const backHandler = BackHandler.addEventListener("hardwareBackPress", () =>
-      isProcessing ? true : false
+    StatusBar.setBarStyle("light-content");
+    const backHandler = BackHandler.addEventListener(
+      "hardwareBackPress",
+      () => registerMutation.isPending
     );
 
     return () => {
+      StatusBar.setBarStyle("dark-content");
       isMounted.current = false;
       backHandler.remove();
     };
-  }, [isProcessing]);
+  }, [registerMutation.isPending]);
 
-  useEffect(() => {
-    return () => {
-      const timerToClean = alertTimerRef.current;
-      if (timerToClean !== null) {
-        clearTimeout(timerToClean);
-      }
-    };
+  const resetScanState = useCallback(() => {
+    setTimeout(() => {
+      if (isMounted.current) canScan.current = true;
+    }, 1000);
   }, []);
 
-  const showAlert = useCallback(
-    (message: string) => {
-      if (!isMounted.current) return;
+  const handleQRScanned = useCallback(
+    ({ data }: BarcodeScanningResult) => {
+      if (registerMutation.isPending || !isMounted.current || !canScan.current)
+        return;
 
-      if (alertTimerRef.current !== null) {
-        clearTimeout(alertTimerRef.current);
-        alertTimerRef.current = null;
+      canScan.current = false;
+
+      if (!data?.trim()) {
+        resetScanState();
+        return;
       }
 
-      setAlertMessage(message);
-      setAlertVisible(true);
-
-      alertOpacity.setValue(0);
-
-      Animated.sequence([
-        Animated.timing(alertOpacity, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.delay(3000),
-        Animated.timing(alertOpacity, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        if (isMounted.current) {
-          setAlertVisible(false);
-        }
-      });
+      registerMutation.mutate(data.trim());
     },
-    [alertOpacity]
+    [registerMutation, resetScanState]
   );
 
   const goBack = useCallback(() => {
-    if (isProcessing) return;
+    if (registerMutation.isPending) return;
     router.back();
-  }, [isProcessing]);
-
-  const handleBarCodeScanned = useCallback(
-    async ({ data }: BarcodeScanningResult) => {
-      if (isProcessing || !isMounted.current || hasScanned.current) return;
-
-      hasScanned.current = true;
-
-      try {
-        setIsProcessing(true);
-
-        if (!data || data.trim() === "") {
-          throw new Error("유효하지 않은 QR 코드입니다");
-        }
-
-        const response = await axios.post<JwtPayload>(
-          `${API_URL}/kiosks/register`,
-          {
-            registrationToken: data.trim(),
-          }
-        );
-
-        if (!isMounted.current) return;
-
-        if (response.data?.accessToken) {
-          await login(response.data.accessToken);
-          router.replace("/products");
-        } else {
-          throw new Error("등록에 실패했습니다");
-        }
-      } catch (error) {
-        if (!isMounted.current) return;
-
-        let errorMessage = "키오스크 등록에 실패했습니다";
-
-        if (isAxiosError(error) && error.response?.data) {
-          const errorData = error.response.data as ErrorResponse;
-          if (errorData.code && ERROR_MESSAGES[errorData.code]) {
-            errorMessage = ERROR_MESSAGES[errorData.code];
-          }
-        } else if (error instanceof Error) {
-          errorMessage = error.message;
-        }
-
-        showAlert(errorMessage);
-        alertTimerRef.current = setTimeout(() => {
-          if (isMounted.current) {
-            hasScanned.current = false;
-          }
-        }, 3000);
-      } finally {
-        if (isMounted.current) {
-          setIsProcessing(false);
-        }
-      }
-    },
-    [isProcessing, login, showAlert]
-  );
+  }, [registerMutation.isPending]);
 
   if (!permission) {
     return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.headerContainer}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={goBack}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>QR 코드 스캔</Text>
-          <View style={{ width: 40 }} />
-        </View>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary600} />
-          <Text style={styles.loadingText}>
-            카메라 권한을 확인하는 중입니다...
-          </Text>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <Header onBack={goBack} />
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={COLORS.primary500} />
+          <Text style={styles.message}>카메라 권한을 확인하는 중입니다</Text>
         </View>
       </SafeAreaView>
     );
@@ -195,40 +118,60 @@ export default function QrScannerScreen() {
     const isBlocked = permission && !permission.canAskAgain;
 
     return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.headerContainer}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={goBack}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>QR 코드 스캔</Text>
-          <View style={{ width: 40 }} />
-        </View>
-        <View style={styles.permissionContainer}>
-          <Text style={styles.permissionTitle}>카메라 권한이 필요합니다</Text>
-          <Text style={styles.permissionSubtitle}>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <Header onBack={goBack} />
+        <View style={styles.center}>
+          <Text style={styles.title}>카메라 권한이 필요합니다</Text>
+          <Text style={styles.message}>
             QR 코드를 스캔하려면 카메라 접근 권한이 필요합니다
           </Text>
-          {isBlocked ? (
-            <TouchableOpacity
-              style={styles.permissionButton}
-              onPress={goBack}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.permissionButtonText}>돌아가기</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={styles.permissionButton}
-              onPress={requestPermission}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.permissionButtonText}>권한 요청하기</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity
+            style={styles.button}
+            onPress={isBlocked ? goBack : requestPermission}
+          >
+            <Text style={styles.buttonText}>
+              {isBlocked ? "돌아가기" : "권한 요청하기"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!permission) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <Header onBack={goBack} />
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={COLORS.primary500} />
+          <Text style={styles.message}>카메라 권한을 확인하는 중입니다</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!permission.granted) {
+    const isBlocked = permission && !permission.canAskAgain;
+
+    return (
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <Header onBack={goBack} />
+        <View style={styles.center}>
+          <Text style={styles.title}>카메라 권한이 필요합니다</Text>
+          <Text style={styles.message}>
+            QR 코드를 스캔하려면 카메라 접근 권한이 필요합니다
+          </Text>
+          <TouchableOpacity
+            style={styles.button}
+            onPress={isBlocked ? goBack : requestPermission}
+          >
+            <Text style={styles.buttonText}>
+              {isBlocked ? "돌아가기" : "권한 요청하기"}
+            </Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -236,6 +179,7 @@ export default function QrScannerScreen() {
 
   return (
     <View style={styles.container}>
+      <StatusBar barStyle="light-content" />
       <CameraView
         style={styles.camera}
         facing="back"
@@ -243,52 +187,68 @@ export default function QrScannerScreen() {
           barcodeTypes: ["qr"],
         }}
         onBarcodeScanned={
-          isProcessing || hasScanned.current ? undefined : handleBarCodeScanned
+          registerMutation.isPending || !canScan.current
+            ? undefined
+            : handleQRScanned
         }
       >
-        <SafeAreaView style={styles.scanAreaContainer}>
-          <View style={styles.headerContainer}>
-            <TouchableOpacity
-              style={styles.backButton}
-              onPress={goBack}
-              disabled={isProcessing}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="arrow-back" size={24} color={COLORS.white} />
-            </TouchableOpacity>
-            <Text style={styles.scanHeaderTitle}>QR 코드 스캔</Text>
-            <View style={{ width: 40 }} />
-          </View>
+        <SafeAreaView style={styles.overlay}>
+          <HeaderLight onBack={goBack} disabled={registerMutation.isPending} />
 
-          <View style={styles.scanOverlay}>
-            <View style={styles.scannerBox}>
-              <View style={[styles.scannerCorner, styles.topLeft]} />
-              <View style={[styles.scannerCorner, styles.topRight]} />
-              <View style={[styles.scannerCorner, styles.bottomLeft]} />
-              <View style={[styles.scannerCorner, styles.bottomRight]} />
+          <View style={styles.scanArea}>
+            <View style={styles.scanFrame}>
+              <View style={[styles.corner, styles.topLeft]} />
+              <View style={[styles.corner, styles.topRight]} />
+              <View style={[styles.corner, styles.bottomLeft]} />
+              <View style={[styles.corner, styles.bottomRight]} />
             </View>
             <Text style={styles.scanText}>
               QR 코드를 프레임 안에 위치시켜주세요
             </Text>
 
-            {isProcessing && (
-              <View style={styles.processingContainer}>
+            {registerMutation.isPending && (
+              <View style={styles.indicator}>
                 <ActivityIndicator size="large" color={COLORS.white} />
-                <Text style={styles.processingText}>처리 중...</Text>
+                <Text style={styles.indicatorText}>처리 중...</Text>
               </View>
             )}
           </View>
         </SafeAreaView>
       </CameraView>
+    </View>
+  );
+}
 
-      {alertVisible && (
-        <Animated.View style={[styles.alert, { opacity: alertOpacity }]}>
-          <View style={styles.alertContent}>
-            <Ionicons name="alert-circle" size={24} color={COLORS.danger500} />
-            <Text style={styles.alertText}>{alertMessage}</Text>
-          </View>
-        </Animated.View>
-      )}
+function Header({ onBack }: { onBack: () => void }) {
+  return (
+    <View style={styles.header}>
+      <TouchableOpacity style={styles.backButton} onPress={onBack}>
+        <Ionicons name="arrow-back" size={24} color={COLORS.gray900} />
+      </TouchableOpacity>
+      <Text style={styles.headerTitle}>QR 코드 스캔</Text>
+      <View style={styles.spacer} />
+    </View>
+  );
+}
+
+function HeaderLight({
+  onBack,
+  disabled = false,
+}: {
+  onBack: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <View style={styles.header}>
+      <TouchableOpacity
+        style={styles.backButton}
+        onPress={onBack}
+        disabled={disabled}
+      >
+        <Ionicons name="arrow-back" size={24} color={COLORS.white} />
+      </TouchableOpacity>
+      <Text style={styles.headerTitleLight}>QR 코드 스캔</Text>
+      <View style={styles.spacer} />
     </View>
   );
 }
@@ -296,24 +256,22 @@ export default function QrScannerScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#000",
-  },
-  safeArea: {
-    flex: 1,
     backgroundColor: COLORS.white,
   },
-  headerContainer: {
+  camera: {
+    flex: 1,
+    backgroundColor: "#000",
+  },
+  overlay: {
+    flex: 1,
+  },
+  header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingVertical: 12,
-    zIndex: 10,
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontFamily: "Pretendard-SemiBold",
-    color: COLORS.text,
+    height: 56,
   },
   backButton: {
     width: 40,
@@ -322,82 +280,68 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 20,
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 24,
-  },
-  loadingText: {
-    fontSize: 16,
-    marginTop: 16,
-    color: COLORS.text,
-    textAlign: "center",
-    fontFamily: "Pretendard-Medium",
-  },
-  permissionContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 24,
-  },
-  permissionTitle: {
-    fontSize: 22,
-    fontFamily: "Pretendard-Bold",
-    color: COLORS.text,
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  permissionSubtitle: {
-    fontSize: 15,
-    fontFamily: "Pretendard-Medium",
-    color: COLORS.textSecondary,
-    textAlign: "center",
-    marginBottom: 32,
-    lineHeight: 22,
-  },
-  permissionButton: {
-    backgroundColor: COLORS.primary600,
-    borderRadius: 12,
-    padding: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    minWidth: 200,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 1.5,
-  },
-  permissionButtonText: {
-    color: COLORS.white,
-    fontSize: 16,
+  headerTitle: {
+    fontSize: 18,
     fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
   },
-  camera: {
-    flex: 1,
-  },
-  scanAreaContainer: {
-    flex: 1,
-  },
-  scanHeaderTitle: {
+  headerTitleLight: {
     fontSize: 18,
     fontFamily: "Pretendard-SemiBold",
     color: COLORS.white,
   },
-  scanOverlay: {
+  spacer: {
+    width: 40,
+  },
+  center: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  title: {
+    fontSize: 22,
+    fontFamily: "Pretendard-Bold",
+    color: COLORS.gray900,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  message: {
+    fontSize: 15,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray600,
+    textAlign: "center",
+    marginTop: 16,
+    marginBottom: 32,
+    lineHeight: 22,
+  },
+  button: {
+    backgroundColor: COLORS.primary500,
+    borderRadius: 6,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 200,
+  },
+  buttonText: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontFamily: "Pretendard-SemiBold",
+  },
+  scanArea: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
   },
-  scannerBox: {
+  scanFrame: {
     width: 280,
     height: 280,
-    borderRadius: 24,
+    borderRadius: 16,
     backgroundColor: "transparent",
     position: "relative",
   },
-  scannerCorner: {
+  corner: {
     position: "absolute",
     width: 30,
     height: 30,
@@ -409,28 +353,28 @@ const styles = StyleSheet.create({
     left: 0,
     borderBottomWidth: 0,
     borderRightWidth: 0,
-    borderTopLeftRadius: 24,
+    borderTopLeftRadius: 16,
   },
   topRight: {
     top: 0,
     right: 0,
     borderBottomWidth: 0,
     borderLeftWidth: 0,
-    borderTopRightRadius: 24,
+    borderTopRightRadius: 16,
   },
   bottomLeft: {
     bottom: 0,
     left: 0,
     borderTopWidth: 0,
     borderRightWidth: 0,
-    borderBottomLeftRadius: 24,
+    borderBottomLeftRadius: 16,
   },
   bottomRight: {
     bottom: 0,
     right: 0,
     borderTopWidth: 0,
     borderLeftWidth: 0,
-    borderBottomRightRadius: 24,
+    borderBottomRightRadius: 16,
   },
   scanText: {
     color: COLORS.white,
@@ -439,50 +383,19 @@ const styles = StyleSheet.create({
     marginTop: 24,
     textAlign: "center",
   },
-  processingContainer: {
+  indicator: {
     backgroundColor: "rgba(0, 0, 0, 0.7)",
-    padding: 24,
-    borderRadius: 16,
+    padding: 20,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
     position: "absolute",
     minWidth: 160,
-    elevation: 5,
   },
-  processingText: {
+  indicatorText: {
     color: COLORS.white,
     marginTop: 12,
     fontSize: 16,
     fontFamily: "Pretendard-Medium",
-  },
-  alert: {
-    position: "absolute",
-    top: 60,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-    paddingHorizontal: 16,
-    zIndex: 1000,
-  },
-  alertContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: COLORS.white,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderRadius: 12,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-    maxWidth: 500,
-  },
-  alertText: {
-    marginLeft: 12,
-    fontSize: 16,
-    fontFamily: "Pretendard-Medium",
-    color: COLORS.text,
-    flex: 1,
   },
 });

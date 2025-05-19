@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 type PaymentRequestStatus = "PENDING" | "COMPLETED" | "FAILED" | "EXPIRED";
 type PaymentRequestMethod = "QR_CODE" | "STUDENT_ID";
@@ -24,93 +26,142 @@ interface PaymentState {
   setStatus: (status: PaymentRequestStatus) => void;
   decrementTimer: () => void;
   resetPayment: () => void;
+  resetPaymentRequest: () => void;
   cancelPayment: () => void;
 }
 
-export const usePaymentStore = create<PaymentState>((set, get) => ({
-  orderId: null,
-  requestId: null,
-  requestCode: null,
-  requestMethod: null,
-  expiresAt: null,
-  timer: 180,
-  isActive: false,
-  status: null,
+const DEFAULT_TIMER = 900;
 
-  createPayment: (orderId) => {
-    set({
-      orderId,
-      timer: 180,
-      isActive: true,
-      status: "PENDING",
-      requestId: null,
-      requestCode: null,
-      requestMethod: null,
-      expiresAt: null,
-    });
-  },
-
-  setPaymentRequest: (
-    requestId,
-    requestCode,
-    status,
-    requestMethod,
-    expiresAt
-  ) => {
-    set({
-      requestId,
-      requestCode,
-      status,
-      requestMethod,
-      expiresAt,
-      isActive: status === "PENDING",
-    });
-
-    // 만료 시간으로부터 타이머 계산
-    const expiryTime = new Date(expiresAt).getTime();
-    const currentTime = new Date().getTime();
-    const timeLeftInSeconds = Math.max(
-      0,
-      Math.floor((expiryTime - currentTime) / 1000)
-    );
-
-    set({ timer: timeLeftInSeconds });
-  },
-
-  setStatus: (status) => {
-    set({ status });
-
-    if (status === "COMPLETED" || status === "FAILED" || status === "EXPIRED") {
-      set({ isActive: false });
-    }
-  },
-
-  decrementTimer: () => {
-    const currentTimer = get().timer;
-    if (currentTimer <= 0) {
-      set({ isActive: false, status: "EXPIRED" });
-    } else {
-      set({ timer: currentTimer - 1 });
-    }
-  },
-
-  resetPayment: () => {
-    set({
+export const usePaymentStore = create<PaymentState>()(
+  persist(
+    (set, get) => ({
       orderId: null,
       requestId: null,
       requestCode: null,
       requestMethod: null,
       expiresAt: null,
-      timer: 180,
+      timer: DEFAULT_TIMER,
       isActive: false,
       status: null,
-    });
-  },
 
-  cancelPayment: () => {
-    set({
-      isActive: false,
-      status: "EXPIRED",
-    });
-  },
-}));
+      createPayment: (orderId) => {
+        set({
+          orderId,
+          timer: DEFAULT_TIMER,
+          isActive: true,
+          status: "PENDING",
+          requestId: null,
+          requestCode: null,
+          requestMethod: null,
+          expiresAt: null,
+        });
+      },
+
+      setPaymentRequest: (
+        requestId,
+        requestCode,
+        status,
+        requestMethod,
+        expiresAt
+      ) => {
+        const { timer } = get();
+        let updatedTimer = timer;
+
+        if (expiresAt) {
+          const expiryTime = new Date(expiresAt).getTime();
+          const currentTime = new Date().getTime();
+          const timeLeftInSeconds = Math.max(
+            0,
+            Math.floor((expiryTime - currentTime) / 1000)
+          );
+
+          if (timeLeftInSeconds < timer) {
+            updatedTimer = timeLeftInSeconds;
+          }
+        }
+
+        set({
+          requestId,
+          requestCode,
+          status,
+          requestMethod,
+          expiresAt,
+          isActive: status === "PENDING",
+          timer: updatedTimer,
+        });
+      },
+
+      setStatus: (status) => {
+        set({
+          status,
+          isActive: status === "PENDING",
+        });
+      },
+
+      decrementTimer: () => {
+        const { timer, status } = get();
+
+        if (timer <= 0) {
+          set({ isActive: false, status: "EXPIRED" });
+        } else if (status === "PENDING") {
+          set({ timer: timer - 1 });
+        }
+      },
+
+      resetPayment: () => {
+        set({
+          orderId: null,
+          requestId: null,
+          requestCode: null,
+          requestMethod: null,
+          expiresAt: null,
+          timer: DEFAULT_TIMER,
+          isActive: false,
+          status: null,
+        });
+      },
+
+      resetPaymentRequest: () => {
+        const { orderId, timer } = get();
+        set({
+          orderId,
+          requestId: null,
+          requestCode: null,
+          requestMethod: null,
+          expiresAt: null,
+          timer,
+          isActive: true,
+          status: "PENDING",
+        });
+      },
+
+      cancelPayment: () => {
+        set({
+          isActive: false,
+          status: "EXPIRED",
+        });
+      },
+    }),
+    {
+      name: "kiosk-payment",
+      storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        orderId: state.orderId,
+        requestId: state.requestId,
+        requestCode: state.requestCode,
+        requestMethod: state.requestMethod,
+        expiresAt: state.expiresAt,
+        timer: state.timer,
+        isActive: state.isActive,
+        status: state.status,
+      }),
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+
+        if (!state.isActive || state.status !== "PENDING" || state.timer <= 0) {
+          setTimeout(() => usePaymentStore.getState().resetPayment(), 0);
+        }
+      },
+    }
+  )
+);

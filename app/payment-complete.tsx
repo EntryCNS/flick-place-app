@@ -44,50 +44,47 @@ export default function PaymentComplete() {
       </View>
 
       <View style={styles.content}>
-        <View style={styles.completionCard}>
-          <View style={styles.checkIconContainer}>
-            <Image
-              source={require("@/assets/images/check-success.png")}
-              style={styles.checkIcon}
-              resizeMode="contain"
-            />
+        <Image
+          source={require("@/assets/images/check.png")}
+          style={styles.checkIcon}
+          resizeMode="contain"
+        />
+
+        <Text style={styles.completionTitle}>결제 완료</Text>
+        <Text style={styles.completionMessage}>
+          주문이 성공적으로 완료되었습니다
+        </Text>
+
+        <View style={styles.infoContainer}>
+          <View style={styles.infoItem}>
+            <Text style={styles.infoLabel}>결제 금액</Text>
+            <Text style={styles.infoValue}>
+              {getTotalAmount().toLocaleString()}원
+            </Text>
           </View>
 
-          <Text style={styles.completionTitle}>결제 완료</Text>
-          <Text style={styles.completionMessage}>
-            주문이 성공적으로 완료되었습니다
-          </Text>
-
-          <View style={styles.orderSummary}>
-            <View style={styles.orderInfoRow}>
-              <Text style={styles.infoLabel}>결제 금액</Text>
-              <Text style={styles.infoValue}>
-                {getTotalAmount().toLocaleString()}원
-              </Text>
-            </View>
-            <View style={styles.orderInfoRow}>
-              <Text style={styles.infoLabel}>결제 시간</Text>
-              <Text style={styles.infoValue}>
-                {`${new Date().toLocaleTimeString("ko-KR", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}`}
-              </Text>
-            </View>
+          <View style={styles.infoItem}>
+            <Text style={styles.infoLabel}>결제 시간</Text>
+            <Text style={styles.infoValue}>
+              {`${new Date().toLocaleTimeString("ko-KR", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}`}
+            </Text>
           </View>
-
-          <Text style={styles.redirectMessage}>
-            10초 후 자동으로 화면이 전환됩니다
-          </Text>
-
-          <TouchableOpacity
-            style={styles.returnButton}
-            onPress={handleGoToMenu}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.returnButtonText}>메뉴로 돌아가기</Text>
-          </TouchableOpacity>
         </View>
+
+        <Text style={styles.redirectMessage}>
+          10초 후 자동으로 화면이 전환됩니다
+        </Text>
+
+        <TouchableOpacity
+          style={styles.returnButton}
+          onPress={handleGoToMenu}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.returnButtonText}>메뉴로 돌아가기</Text>
+        </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
@@ -96,13 +93,13 @@ export default function PaymentComplete() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: "#FFFFFF",
   },
   header: {
     paddingVertical: 16,
     alignItems: "center",
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.gray200,
+    borderBottomColor: COLORS.gray100,
     backgroundColor: "#FFFFFF",
   },
   headerTitle: {
@@ -117,79 +114,65 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 20,
-  },
-  completionCard: {
-    width: "60%",
-    maxWidth: 500,
-    padding: 40,
-    borderRadius: 12,
+    padding: 24,
     backgroundColor: "#FFFFFF",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: COLORS.gray200,
-  },
-  checkIconContainer: {
-    marginBottom: 20,
   },
   checkIcon: {
-    width: 100,
-    height: 100,
+    width: 110,
+    height: 110,
+    marginBottom: 32,
   },
   completionTitle: {
-    fontSize: 28,
+    fontSize: 36,
     fontFamily: "Pretendard-Bold",
     color: COLORS.gray900,
-    marginBottom: 12,
+    marginBottom: 16,
   },
   completionMessage: {
-    fontSize: 16,
+    fontSize: 18,
     fontFamily: "Pretendard-Medium",
     color: COLORS.gray600,
     textAlign: "center",
-    marginBottom: 32,
+    marginBottom: 48,
   },
-  orderSummary: {
+  infoContainer: {
     width: "100%",
-    backgroundColor: COLORS.gray50,
-    borderRadius: 10,
-    padding: 20,
-    marginBottom: 24,
-  },
-  orderInfoRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.gray100,
+    justifyContent: "space-evenly",
+    marginBottom: 40,
+  },
+  infoItem: {
+    alignItems: "center",
+    paddingHorizontal: 24,
   },
   infoLabel: {
-    fontSize: 15,
+    fontSize: 16,
     fontFamily: "Pretendard-Medium",
     color: COLORS.gray600,
+    marginBottom: 8,
   },
   infoValue: {
-    fontSize: 16,
-    fontFamily: "Pretendard-SemiBold",
+    fontSize: 24,
+    fontFamily: "Pretendard-Bold",
     color: COLORS.gray900,
   },
   redirectMessage: {
     fontSize: 14,
     fontFamily: "Pretendard-Regular",
     color: COLORS.gray500,
-    marginBottom: 24,
+    marginBottom: 32,
   },
   returnButton: {
     backgroundColor: COLORS.primary500,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-    width: "100%",
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    width: "60%",
     alignItems: "center",
   },
   returnButtonText: {
     color: "#FFFFFF",
-    fontSize: 16,
+    fontSize: 18,
     fontFamily: "Pretendard-SemiBold",
   },
 });

@@ -8,19 +8,24 @@
     "scheme": "flickplace",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/images/logo.png",
-      "backgroundColor": "#ffffff",
-      "resizeMode": "contain"
-    },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.flick.place",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "카메라 접근 권한이 필요합니다",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        },
+        "NSExceptionDomains": {
+          "proxia.kr": {
+            "NSIncludesSubdomains": true,
+            "NSTemporaryExceptionAllowsInsecureHTTPLoads": true,
+            "NSExceptionAllowsInsecureHTTPLoads": true,
+            "NSExceptionMinimumTLSVersion": "TLSv1.2"
+          }
+        }
       }
     },
     "android": {
@@ -31,6 +36,8 @@
       "package": "com.flick.place",
       "softwareKeyboardLayoutMode": "pan",
       "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
       ]
@@ -62,6 +69,12 @@
       "eas": {
         "projectId": "30c8a65b-a8a8-482f-a421-50358a549e83"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/30c8a65b-a8a8-482f-a421-50358a549e83"
     }
   }
 }

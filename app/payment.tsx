@@ -1,7 +1,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import { isAxiosError } from "axios";
 import { router } from "expo-router";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Animated,
@@ -13,12 +19,12 @@ import {
   View,
 } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import Toast from "react-native-toast-message";
 import { API_URL } from "@/constants/api";
 import { COLORS } from "@/constants/colors";
 import api from "@/libs/api";
 import { useCartStore } from "@/stores/cart";
 import { usePaymentStore } from "@/stores/payment";
+import { useMutation } from "@tanstack/react-query";
 
 interface CartItemType {
   id: number;
@@ -28,15 +34,26 @@ interface CartItemType {
 }
 
 type PaymentMethod = "QR_CODE" | "STUDENT_ID";
+type WebSocketStatus = "CONNECTING" | "CONNECTED" | "DISCONNECTED" | "FAILED";
 
-const ERROR_MESSAGES: Record<string, string> = {
+interface NotificationType {
+  type: "success" | "error" | "info";
+  message: string;
+  submessage?: string;
+}
+
+const ERROR_MESSAGES = {
   ORDER_NOT_FOUND: "주문을 찾을 수 없습니다",
   ORDER_NOT_PENDING: "이미 처리된 주문입니다",
   USER_NOT_FOUND: "등록되지 않은 학번입니다",
   BOOTH_NOT_FOUND: "부스 정보를 찾을 수 없습니다",
 };
 
-export default function Payment() {
+const NOTIFICATION_DURATION = 3000;
+const WS_RECONNECT_DELAY = 3000;
+const MAX_RECONNECT_ATTEMPTS = 3;
+
+export default function PaymentScreen() {
   const { items: cart, getTotalAmount, clearCart } = useCartStore();
   const {
     orderId,
@@ -50,23 +67,173 @@ export default function Payment() {
     setStatus,
     requestMethod,
     setPaymentRequest,
-    resetPayment,
+    resetPaymentRequest,
   } = usePaymentStore();
 
   const [selectedMethod, setSelectedMethod] =
     useState<PaymentMethod>("QR_CODE");
   const [studentId, setStudentId] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [notification, setNotification] = useState<NotificationType | null>(
+    null
+  );
+  const [wsStatus, setWsStatus] = useState<WebSocketStatus>("DISCONNECTED");
 
+  const wsReconnectAttemptsRef = useRef<number>(0);
   const timerAnimValue = useRef(new Animated.Value(1)).current;
   const webSocketRef = useRef<WebSocket | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  const wsReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
 
-  // 타이머 애니메이션 (60초 미만일 때)
+  const cancelOrderMutation = useMutation({
+    mutationFn: async () => {
+      if (orderId) {
+        return await api.post(`/orders/${orderId}/cancel`);
+      }
+      return null;
+    },
+    onError: (error) => {
+      let message = "주문 취소 중 오류가 발생했습니다";
+
+      if (isAxiosError(error) && error.response?.data) {
+        const errorData = error.response.data;
+        if (
+          errorData?.code &&
+          ERROR_MESSAGES[errorData.code as keyof typeof ERROR_MESSAGES]
+        ) {
+          message =
+            ERROR_MESSAGES[errorData.code as keyof typeof ERROR_MESSAGES];
+        }
+      }
+
+      showNotification("error", message);
+    },
+    onSettled: () => {
+      cancelPayment();
+      clearCart();
+      router.replace("/products");
+    },
+  });
+
+  const qrPaymentMutation = useMutation({
+    mutationFn: async () => {
+      if (!orderId) throw new Error("주문 정보가 없습니다");
+      const response = await api.post("/payments/qr", { orderId });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      setPaymentRequest(
+        data.id,
+        data.token || "",
+        "PENDING",
+        "QR_CODE",
+        data.expiresAt || new Date(Date.now() + 15 * 60 * 1000).toISOString()
+      );
+    },
+    onError: (error) => {
+      let errorMsg = "결제 요청을 생성할 수 없습니다";
+      let code = null;
+
+      if (isAxiosError(error) && error.response?.data) {
+        const errorData = error.response.data;
+        code = errorData?.code;
+
+        if (code && ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES]) {
+          errorMsg = ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES];
+        }
+      }
+
+      setErrorCode(code);
+      setErrorMessage(errorMsg);
+      showNotification("error", errorMsg);
+    },
+  });
+
+  const studentIdPaymentMutation = useMutation({
+    mutationFn: async (studentIdValue: string) => {
+      if (!orderId) throw new Error("주문 정보가 없습니다");
+      const response = await api.post("/payments/student-id", {
+        orderId,
+        studentId: studentIdValue.trim(),
+      });
+      return response.data;
+    },
+    onSuccess: (data) => {
+      setPaymentRequest(
+        data.id,
+        data.token || studentId,
+        "PENDING",
+        "STUDENT_ID",
+        data.expiresAt || new Date(Date.now() + 15 * 60 * 1000).toISOString()
+      );
+
+      showNotification("success", "학번 결제 요청 완료");
+    },
+    onError: (error) => {
+      let errorMsg = "결제 요청에 실패했습니다";
+      let code = null;
+
+      if (isAxiosError(error) && error.response?.data) {
+        const errorData = error.response.data;
+        code = errorData?.code;
+
+        if (code && ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES]) {
+          errorMsg = ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES];
+        }
+      }
+
+      setErrorCode(code);
+      setErrorMessage(errorMsg);
+      showNotification("error", errorMsg);
+    },
+  });
+
+  const showNotification = useCallback(
+    (
+      type: "success" | "error" | "info",
+      message: string,
+      submessage?: string
+    ) => {
+      if (notificationTimeoutRef.current) {
+        clearTimeout(notificationTimeoutRef.current);
+      }
+
+      setNotification({ type, message, submessage });
+
+      notificationTimeoutRef.current = setTimeout(() => {
+        setNotification(null);
+      }, NOTIFICATION_DURATION);
+    },
+    []
+  );
+
   useEffect(() => {
-    if (timer <= 60) {
+    return () => {
+      if (notificationTimeoutRef.current) {
+        clearTimeout(notificationTimeoutRef.current);
+      }
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      if (wsReconnectTimeoutRef.current) {
+        clearTimeout(wsReconnectTimeoutRef.current);
+      }
+      if (webSocketRef.current) {
+        webSocketRef.current.close();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const shouldAnimate = timer <= 60;
+
+    if (shouldAnimate) {
       Animated.loop(
         Animated.sequence([
           Animated.timing(timerAnimValue, {
@@ -84,40 +251,23 @@ export default function Payment() {
     } else {
       timerAnimValue.setValue(1);
     }
-  }, [timer <= 60]);
 
-  const handleCancel = useCallback(async () => {
-    try {
-      setIsSubmitting(true);
-      if (orderId) {
-        await api.post(`/orders/${orderId}/cancel`);
-      }
-    } catch (error) {
-      let message = "주문 취소 중 오류가 발생했습니다";
+    return () => {
+      timerAnimValue.stopAnimation();
+    };
+  }, [timer, timerAnimValue]);
 
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        if (errorData?.code && ERROR_MESSAGES[errorData.code]) {
-          message = ERROR_MESSAGES[errorData.code];
-        }
-      }
-
-      Toast.show({
-        type: "error",
-        text1: message,
-      });
-    } finally {
-      setIsSubmitting(false);
-      cancelPayment();
-      clearCart();
-      router.replace("/products");
-    }
-  }, [orderId, cancelPayment, clearCart]);
+  const handleCancel = useCallback(() => {
+    cancelOrderMutation.mutate();
+  }, [cancelOrderMutation]);
 
   useEffect(() => {
     if (isActive && timer > 0) {
-      intervalRef.current = setInterval(decrementTimer, 1000);
-    } else if (timer <= 0) {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      timerIntervalRef.current = setInterval(decrementTimer, 1000);
+    } else if (timer <= 0 && isActive) {
       handleCancel();
     }
 
@@ -126,22 +276,42 @@ export default function Payment() {
     }
 
     return () => {
-      if (intervalRef.current !== null) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
     };
   }, [isActive, timer, status, decrementTimer, handleCancel]);
 
-  useEffect(() => {
-    if (requestId) {
-      const wsUrl = `${API_URL.replace(
-        "http",
-        "ws"
-      )}/ws/payment-requests/${requestId}`;
-      webSocketRef.current = new WebSocket(wsUrl);
+  const connectWebSocket = useCallback(() => {
+    if (!requestId) return;
 
-      webSocketRef.current.onmessage = (event) => {
+    if (wsStatus === "CONNECTING" || wsStatus === "CONNECTED") return;
+
+    setWsStatus("CONNECTING");
+
+    const wsUrl = `${API_URL.replace(
+      "http",
+      "ws"
+    )}/ws/payment-requests/${requestId}`;
+
+    try {
+      if (
+        webSocketRef.current &&
+        webSocketRef.current.readyState !== WebSocket.CLOSED
+      ) {
+        webSocketRef.current.close();
+      }
+
+      const ws = new WebSocket(wsUrl);
+      webSocketRef.current = ws;
+
+      ws.onopen = () => {
+        setWsStatus("CONNECTED");
+        wsReconnectAttemptsRef.current = 0;
+      };
+
+      ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
 
@@ -149,105 +319,132 @@ export default function Payment() {
             setStatus("COMPLETED");
           } else if (data.status === "FAILED") {
             setStatus("FAILED");
-            Toast.show({
-              type: "error",
-              text1: "결제 실패",
-              text2: data.message || "결제가 실패했습니다.",
-            });
+            showNotification(
+              "error",
+              "결제 실패",
+              data.message || "결제가 실패했습니다."
+            );
           } else if (data.status === "EXPIRED") {
             setStatus("EXPIRED");
-            Toast.show({
-              type: "error",
-              text1: "결제 시간이 초과되었습니다.",
-            });
+            showNotification("error", "결제 시간이 초과되었습니다.");
             handleCancel();
           }
-        } catch (error) {
-          console.error("웹소켓 메시지 처리 실패:", error);
+        } catch {
+          console.error("웹소켓 메시지 처리 실패");
         }
       };
 
-      webSocketRef.current.onerror = () => {
-        Toast.show({
-          type: "error",
-          text1: "결제 상태 업데이트 실패",
-        });
+      ws.onerror = () => {
+        setWsStatus("FAILED");
       };
 
-      return () => {
-        if (
-          webSocketRef.current &&
-          webSocketRef.current.readyState !== WebSocket.CLOSED
-        ) {
-          webSocketRef.current.close();
-        }
-      };
-    }
-  }, [requestId, setStatus, handleCancel]);
+      ws.onclose = (event) => {
+        if (!event.wasClean) {
+          setWsStatus("DISCONNECTED");
 
-  useEffect(() => {
-    const createQrPaymentRequest = async () => {
-      if (!orderId || requestCode) return;
+          if (
+            wsReconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS &&
+            requestId
+          ) {
+            const delay = Math.min(
+              WS_RECONNECT_DELAY * (wsReconnectAttemptsRef.current + 1),
+              10000
+            );
 
-      try {
-        setIsSubmitting(true);
-        setErrorMessage(null);
-        setErrorCode(null);
+            if (wsReconnectTimeoutRef.current) {
+              clearTimeout(wsReconnectTimeoutRef.current);
+            }
 
-        const response = await api.post("/payments/qr", { orderId });
-
-        if (response.data) {
-          setPaymentRequest(
-            response.data.id,
-            response.data.token || "",
-            "PENDING",
-            "QR_CODE",
-            response.data.expiresAt ||
-              new Date(Date.now() + 15 * 60 * 1000).toISOString()
-          );
-        }
-      } catch (error) {
-        let errorMsg = "결제 요청을 생성할 수 없습니다";
-        let code = null;
-
-        if (isAxiosError(error) && error.response?.data) {
-          const errorData = error.response.data;
-          code = errorData?.code;
-
-          if (code && ERROR_MESSAGES[code]) {
-            errorMsg = ERROR_MESSAGES[code];
+            wsReconnectTimeoutRef.current = setTimeout(() => {
+              wsReconnectAttemptsRef.current += 1;
+              connectWebSocket();
+            }, delay);
+          } else {
+            setWsStatus("FAILED");
           }
         }
+      };
+    } catch {
+      setWsStatus("FAILED");
+    }
+  }, [requestId, showNotification, setStatus, handleCancel, wsStatus]);
 
-        setErrorCode(code);
-        setErrorMessage(errorMsg);
-        Toast.show({
-          type: "error",
-          text1: errorMsg,
-        });
-      } finally {
-        setIsSubmitting(false);
+  useEffect(() => {
+    let shouldConnect = false;
+
+    if (requestId && wsStatus !== "CONNECTED") {
+      shouldConnect = true;
+    } else if (!requestId) {
+      setWsStatus("DISCONNECTED");
+
+      if (webSocketRef.current) {
+        webSocketRef.current.close();
       }
-    };
 
-    if (selectedMethod === "QR_CODE" && orderId && !requestCode) {
+      if (wsReconnectTimeoutRef.current) {
+        clearTimeout(wsReconnectTimeoutRef.current);
+      }
+    }
+
+    if (shouldConnect) {
+      const timeoutId = setTimeout(() => {
+        connectWebSocket();
+      }, 0);
+
+      return () => clearTimeout(timeoutId);
+    }
+  }, [requestId, connectWebSocket, wsStatus]);
+
+  const handleReconnectWebSocket = useCallback(() => {
+    wsReconnectAttemptsRef.current = 0;
+    connectWebSocket();
+  }, [connectWebSocket]);
+
+  const createQrPaymentRequest = useCallback(() => {
+    qrPaymentMutation.mutate();
+  }, [qrPaymentMutation]);
+
+  useEffect(() => {
+    if (
+      selectedMethod === "QR_CODE" &&
+      orderId &&
+      !requestCode &&
+      !qrPaymentMutation.isPending
+    ) {
       createQrPaymentRequest();
     }
-  }, [selectedMethod, orderId, requestCode, setPaymentRequest]);
+  }, [
+    selectedMethod,
+    orderId,
+    requestCode,
+    createQrPaymentRequest,
+    qrPaymentMutation.isPending,
+  ]);
 
   const handleMethodChange = useCallback(
     (method: PaymentMethod) => {
-      if (selectedMethod !== method) {
+      if (
+        selectedMethod !== method &&
+        !qrPaymentMutation.isPending &&
+        !studentIdPaymentMutation.isPending
+      ) {
         setSelectedMethod(method);
         setErrorMessage(null);
         setErrorCode(null);
+
+        resetPaymentRequest();
 
         if (method === "STUDENT_ID") {
           setStudentId("");
         }
       }
     },
-    [selectedMethod]
+    [
+      selectedMethod,
+      resetPaymentRequest,
+      qrPaymentMutation.isPending,
+      studentIdPaymentMutation.isPending,
+    ]
   );
 
   const validateStudentId = useCallback((id: string): boolean => {
@@ -267,63 +464,19 @@ export default function Payment() {
     );
   }, []);
 
-  const handleStudentIdSubmit = useCallback(async () => {
+  const handleStudentIdSubmit = useCallback(() => {
     if (!validateStudentId(studentId)) {
-      Toast.show({
-        type: "info",
-        text1: "올바른 학번 형식이 아닙니다",
-      });
+      showNotification("info", "올바른 학번 형식이 아닙니다");
       return;
     }
 
-    try {
-      setIsSubmitting(true);
-      setErrorMessage(null);
-      setErrorCode(null);
-
-      const response = await api.post("/payments/student-id", {
-        orderId,
-        studentId: studentId.trim(),
-      });
-
-      if (response.data) {
-        setPaymentRequest(
-          response.data.id,
-          response.data.token || studentId,
-          "PENDING",
-          "STUDENT_ID",
-          response.data.expiresAt ||
-            new Date(Date.now() + 15 * 60 * 1000).toISOString()
-        );
-
-        Toast.show({
-          type: "success",
-          text1: "학번 결제 요청 완료",
-        });
-      }
-    } catch (error) {
-      let errorMsg = "결제 요청에 실패했습니다";
-      let code = null;
-
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        code = errorData?.code;
-
-        if (code && ERROR_MESSAGES[code]) {
-          errorMsg = ERROR_MESSAGES[code];
-        }
-      }
-
-      setErrorCode(code);
-      setErrorMessage(errorMsg);
-      Toast.show({
-        type: "error",
-        text1: errorMsg,
-      });
-    } finally {
-      setIsSubmitting(false);
-    }
-  }, [studentId, orderId, setPaymentRequest, validateStudentId]);
+    studentIdPaymentMutation.mutate(studentId);
+  }, [
+    studentId,
+    validateStudentId,
+    showNotification,
+    studentIdPaymentMutation,
+  ]);
 
   const formatTime = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
@@ -334,26 +487,14 @@ export default function Payment() {
   }, []);
 
   const handleRetry = useCallback(() => {
-    if (selectedMethod === "QR_CODE") {
-      resetPayment();
-      setErrorMessage(null);
-      setErrorCode(null);
+    resetPaymentRequest();
+    setErrorMessage(null);
+    setErrorCode(null);
 
-      if (orderId) {
-        setPaymentRequest(
-          0,
-          "",
-          "PENDING",
-          "QR_CODE",
-          new Date(Date.now() + 15 * 60 * 1000).toISOString()
-        );
-      }
-    } else {
+    if (selectedMethod === "STUDENT_ID") {
       setStudentId("");
-      setErrorMessage(null);
-      setErrorCode(null);
     }
-  }, [selectedMethod, orderId, resetPayment, setPaymentRequest]);
+  }, [selectedMethod, resetPaymentRequest]);
 
   const renderErrorAction = useCallback(() => {
     if (!errorCode) return null;
@@ -413,60 +554,299 @@ export default function Payment() {
     [studentId]
   );
 
-  const renderKeypad = () => {
-    const keys = [
+  const keypadButtons = useMemo(() => {
+    return [
       ["1", "2", "3"],
       ["4", "5", "6"],
       ["7", "8", "9"],
       ["clear", "0", "delete"],
     ];
+  }, []);
 
+  const renderKeypadButton = useCallback(
+    (key: string, index: number) => (
+      <TouchableOpacity
+        key={`key-${key}-${index}`}
+        style={[
+          styles.keypadButton,
+          key === "delete" || key === "clear"
+            ? styles.keypadActionButton
+            : null,
+        ]}
+        onPress={() => handleKeypadPress(key)}
+        activeOpacity={0.6}
+      >
+        {key === "delete" ? (
+          <Text style={styles.keypadActionText}>←</Text>
+        ) : key === "clear" ? (
+          <Text style={styles.keypadActionText}>C</Text>
+        ) : (
+          <Text style={styles.keypadButtonText}>{key}</Text>
+        )}
+      </TouchableOpacity>
+    ),
+    [handleKeypadPress]
+  );
+
+  const renderKeypad = useCallback(() => {
     return (
       <View style={styles.keypadContainer}>
-        {keys.map((row, rowIndex) => (
+        {keypadButtons.map((row, rowIndex) => (
           <View key={`row-${rowIndex}`} style={styles.keypadRow}>
-            {row.map((key) => (
-              <TouchableOpacity
-                key={`key-${key}`}
-                style={[
-                  styles.keypadButton,
-                  key === "delete" || key === "clear"
-                    ? styles.keypadActionButton
-                    : null,
-                ]}
-                onPress={() => handleKeypadPress(key)}
-                activeOpacity={0.6}
-              >
-                {key === "delete" ? (
-                  <Ionicons
-                    name="backspace-outline"
-                    size={22}
-                    color={COLORS.gray600}
-                  />
-                ) : key === "clear" ? (
-                  <Text style={styles.keypadActionText}>삭제</Text>
-                ) : (
-                  <Text style={styles.keypadButtonText}>{key}</Text>
-                )}
-              </TouchableOpacity>
-            ))}
+            {row.map((key, keyIndex) => renderKeypadButton(key, keyIndex))}
           </View>
         ))}
       </View>
     );
-  };
+  }, [keypadButtons, renderKeypadButton]);
+
+  const renderNotification = useCallback(() => {
+    if (!notification) return null;
+
+    const getNotificationStyle = () => {
+      switch (notification.type) {
+        case "success":
+          return styles.notificationSuccess;
+        case "error":
+          return styles.notificationError;
+        case "info":
+          return styles.notificationInfo;
+        default:
+          return {};
+      }
+    };
+
+    const getNotificationIcon = () => {
+      switch (notification.type) {
+        case "success":
+          return (
+            <Ionicons
+              name="checkmark-circle"
+              size={24}
+              color={COLORS.success500}
+            />
+          );
+        case "error":
+          return (
+            <Ionicons name="alert-circle" size={24} color={COLORS.danger500} />
+          );
+        case "info":
+          return (
+            <Ionicons
+              name="information-circle"
+              size={24}
+              color={COLORS.primary500}
+            />
+          );
+        default:
+          return null;
+      }
+    };
+
+    return (
+      <Animated.View
+        style={[styles.notificationContainer, getNotificationStyle()]}
+      >
+        {getNotificationIcon()}
+        <View style={styles.notificationContent}>
+          <Text style={styles.notificationText}>{notification.message}</Text>
+          {notification.submessage && (
+            <Text style={styles.notificationSubText}>
+              {notification.submessage}
+            </Text>
+          )}
+        </View>
+        <TouchableOpacity
+          onPress={() => setNotification(null)}
+          style={styles.notificationCloseButton}
+        >
+          <Text style={styles.notificationCloseText}>×</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    );
+  }, [notification]);
+
+  const getWsStatusColor = useCallback(() => {
+    switch (wsStatus) {
+      case "CONNECTED":
+        return COLORS.success500;
+      case "CONNECTING":
+        return COLORS.warning500;
+      case "DISCONNECTED":
+      case "FAILED":
+        return COLORS.danger500;
+      default:
+        return COLORS.gray500;
+    }
+  }, [wsStatus]);
+
+  const isSubmitting =
+    qrPaymentMutation.isPending ||
+    studentIdPaymentMutation.isPending ||
+    cancelOrderMutation.isPending;
+
+  const renderQRPaymentContent = useCallback(() => {
+    if (qrPaymentMutation.isPending || (!requestCode && !errorMessage)) {
+      return (
+        <View style={styles.centerContent}>
+          <ActivityIndicator size="large" color={COLORS.primary500} />
+          <Text style={styles.loadingText}>QR 코드 생성 중...</Text>
+        </View>
+      );
+    }
+
+    if (errorMessage) {
+      return (
+        <View style={styles.centerContent}>
+          <Ionicons name="alert-circle" size={44} color={COLORS.danger500} />
+          <Text style={styles.errorText}>{errorMessage}</Text>
+          {renderErrorAction()}
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.centerContent}>
+        <View style={styles.qrContainer}>
+          <QRCode
+            value={requestCode || ""}
+            size={200}
+            color="#000000"
+            backgroundColor="#FFFFFF"
+          />
+        </View>
+        <Text style={styles.instructionText}>
+          QR 코드를 스캔하여 결제해 주세요
+        </Text>
+        <Text style={styles.subText}>결제가 완료될 때까지 기다려주세요</Text>
+      </View>
+    );
+  }, [
+    qrPaymentMutation.isPending,
+    requestCode,
+    errorMessage,
+    renderErrorAction,
+  ]);
+
+  const renderStudentIdPaymentContent = useCallback(() => {
+    if (requestMethod === "STUDENT_ID" && requestCode) {
+      return (
+        <View style={styles.centerContent}>
+          <Ionicons
+            name="checkmark-circle"
+            size={56}
+            color={COLORS.success500}
+          />
+          <Text style={styles.successText}>학번 결제가 요청되었습니다</Text>
+          <Text style={styles.subText}>결제가 완료될 때까지 기다려주세요</Text>
+
+          <View style={styles.studentNumberContainer}>
+            <View style={styles.studentNumberDigits}>
+              {studentId.split("").map((digit, index) => (
+                <View key={index} style={styles.studentNumberDigitBox}>
+                  <Text style={styles.studentNumberDigit}>{digit}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.buttonsContainer}>
+            <TouchableOpacity
+              style={styles.retryButton}
+              onPress={handleRetry}
+              disabled={isSubmitting}
+              activeOpacity={0.7}
+            >
+              {isSubmitting ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text style={styles.buttonText}>다시 요청하기</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    if (errorMessage) {
+      return (
+        <View style={styles.centerContent}>
+          <Ionicons name="alert-circle" size={44} color={COLORS.danger500} />
+          <Text style={styles.errorText}>{errorMessage}</Text>
+          {renderErrorAction()}
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.centerContent}>
+        <Text style={styles.instructionText}>4자리 학번을 입력해주세요</Text>
+
+        <View style={styles.digitBoxContainer}>
+          {[0, 1, 2, 3].map((index) => (
+            <View
+              key={`digit-${index}`}
+              style={[
+                styles.digitBox,
+                index < studentId.length && styles.digitBoxFilled,
+              ]}
+            >
+              {index < studentId.length && (
+                <Text style={styles.digitText}>{studentId[index]}</Text>
+              )}
+            </View>
+          ))}
+        </View>
+
+        {renderKeypad()}
+
+        <TouchableOpacity
+          style={[
+            styles.submitButton,
+            (!validateStudentId(studentId) ||
+              studentIdPaymentMutation.isPending) &&
+              styles.disabledButton,
+          ]}
+          onPress={handleStudentIdSubmit}
+          disabled={
+            !validateStudentId(studentId) || studentIdPaymentMutation.isPending
+          }
+          activeOpacity={0.7}
+        >
+          {studentIdPaymentMutation.isPending ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : (
+            <Text style={styles.buttonText}>결제 요청하기</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    );
+  }, [
+    requestMethod,
+    requestCode,
+    studentId,
+    errorMessage,
+    isSubmitting,
+    validateStudentId,
+    studentIdPaymentMutation.isPending,
+    handleRetry,
+    handleStudentIdSubmit,
+    renderErrorAction,
+    renderKeypad,
+  ]);
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* 헤더 */}
+      {renderNotification()}
+
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.backButton}
-          onPress={handleCancel}
+          onPress={() => router.push("/products")}
           disabled={isSubmitting}
           activeOpacity={0.7}
         >
-          <Ionicons name="chevron-back" size={24} color={COLORS.gray800} />
+          <Ionicons name="arrow-back" size={24} color={COLORS.gray800} />
           <Text style={styles.backButtonText}>돌아가기</Text>
         </TouchableOpacity>
 
@@ -474,23 +854,34 @@ export default function Payment() {
           <Text style={styles.brandText}>Flick</Text> Place
         </Text>
 
-        <Animated.View
-          style={[styles.timerWrapper, { opacity: timerAnimValue }]}
-        >
-          <Ionicons
-            name="time-outline"
-            size={22}
-            color={timer <= 60 ? COLORS.danger500 : COLORS.gray700}
+        <View style={styles.headerRightContainer}>
+          <TouchableOpacity
+            style={[
+              styles.wsStatusIndicator,
+              { backgroundColor: getWsStatusColor() },
+            ]}
+            onPress={
+              wsStatus === "FAILED" ? handleReconnectWebSocket : undefined
+            }
           />
-          <Text style={[styles.timerText, timer <= 60 && styles.timerWarning]}>
-            {formatTime(timer)}
-          </Text>
-        </Animated.View>
+          <Animated.View
+            style={[styles.timerWrapper, { opacity: timerAnimValue }]}
+          >
+            <Ionicons
+              name="time-outline"
+              size={22}
+              color={timer <= 60 ? COLORS.danger500 : COLORS.gray700}
+            />
+            <Text
+              style={[styles.timerText, timer <= 60 && styles.timerWarning]}
+            >
+              {formatTime(timer)}
+            </Text>
+          </Animated.View>
+        </View>
       </View>
 
-      {/* 메인 콘텐츠 */}
       <View style={styles.mainContent}>
-        {/* 왼쪽 패널: 결제 방법 */}
         <View style={styles.leftPanel}>
           <View style={styles.tabBar}>
             <TouchableOpacity
@@ -551,124 +942,14 @@ export default function Payment() {
           </View>
 
           <View style={styles.paymentContent}>
-            {selectedMethod === "QR_CODE" ? (
-              <View style={styles.centerContentWrapper}>
-                {isSubmitting || (!requestCode && !errorMessage) ? (
-                  <View style={styles.centerContent}>
-                    <ActivityIndicator size="large" color={COLORS.primary500} />
-                    <Text style={styles.loadingText}>QR 코드 생성 중...</Text>
-                  </View>
-                ) : errorMessage ? (
-                  <View style={styles.centerContent}>
-                    <Ionicons
-                      name="alert-circle-outline"
-                      size={44}
-                      color={COLORS.danger500}
-                    />
-                    <Text style={styles.errorText}>{errorMessage}</Text>
-                    {renderErrorAction()}
-                  </View>
-                ) : (
-                  <View style={styles.centerContent}>
-                    <View style={styles.qrContainer}>
-                      <QRCode
-                        value={requestCode || ""}
-                        size={180}
-                        color="#000000"
-                        backgroundColor="#FFFFFF"
-                      />
-                    </View>
-                    <Text style={styles.instructionText}>
-                      QR 코드를 스캔하여 결제해 주세요
-                    </Text>
-                    <Text style={styles.subText}>
-                      결제가 완료될 때까지 기다려주세요
-                    </Text>
-                  </View>
-                )}
-              </View>
-            ) : (
-              <View style={styles.centerContentWrapper}>
-                {requestMethod === "STUDENT_ID" && requestCode ? (
-                  <View style={styles.centerContent}>
-                    <Ionicons
-                      name="checkmark-circle"
-                      size={56}
-                      color={COLORS.success500}
-                    />
-                    <Text style={styles.successText}>
-                      학번 결제가 요청되었습니다
-                    </Text>
-                    <Text style={styles.subText}>
-                      결제가 완료될 때까지 기다려주세요
-                    </Text>
-                    <View style={styles.studentIdBadge}>
-                      <Text style={styles.studentIdBadgeText}>
-                        학번: {studentId}
-                      </Text>
-                    </View>
-                  </View>
-                ) : errorMessage ? (
-                  <View style={styles.centerContent}>
-                    <Ionicons
-                      name="alert-circle-outline"
-                      size={44}
-                      color={COLORS.danger500}
-                    />
-                    <Text style={styles.errorText}>{errorMessage}</Text>
-                    {renderErrorAction()}
-                  </View>
-                ) : (
-                  <View style={styles.centerContent}>
-                    <Text style={styles.instructionText}>
-                      4자리 학번을 입력해주세요
-                    </Text>
-                    <Text style={styles.subText}>예: 1학년 2반 3번 → 1203</Text>
-
-                    <View style={styles.digitBoxContainer}>
-                      {[0, 1, 2, 3].map((index) => (
-                        <View
-                          key={`digit-${index}`}
-                          style={[
-                            styles.digitBox,
-                            index < studentId.length && styles.digitBoxFilled,
-                          ]}
-                        >
-                          {index < studentId.length && (
-                            <Text style={styles.digitText}>
-                              {studentId[index]}
-                            </Text>
-                          )}
-                        </View>
-                      ))}
-                    </View>
-
-                    {renderKeypad()}
-
-                    <TouchableOpacity
-                      style={[
-                        styles.submitButton,
-                        (!validateStudentId(studentId) || isSubmitting) &&
-                          styles.disabledButton,
-                      ]}
-                      onPress={handleStudentIdSubmit}
-                      disabled={!validateStudentId(studentId) || isSubmitting}
-                      activeOpacity={0.7}
-                    >
-                      {isSubmitting ? (
-                        <ActivityIndicator size="small" color="#FFFFFF" />
-                      ) : (
-                        <Text style={styles.buttonText}>결제 요청하기</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            )}
+            <View style={styles.centerContentWrapper}>
+              {selectedMethod === "QR_CODE"
+                ? renderQRPaymentContent()
+                : renderStudentIdPaymentContent()}
+            </View>
           </View>
         </View>
 
-        {/* 오른쪽 패널: 주문 내역 */}
         <View style={styles.rightPanel}>
           <View style={styles.orderHeader}>
             <Text style={styles.orderHeaderText}>주문 내역</Text>
@@ -697,10 +978,10 @@ export default function Payment() {
               disabled={isSubmitting}
               activeOpacity={0.7}
             >
-              {isSubmitting ? (
-                <ActivityIndicator size="small" color={COLORS.danger500} />
+              {cancelOrderMutation.isPending ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
-                <Text style={styles.cancelText}>결제 취소</Text>
+                <Text style={styles.cancelButtonText}>결제 취소</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -720,14 +1001,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     backgroundColor: "#FFFFFF",
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.gray200,
+    height: 60,
   },
   backButton: {
     flexDirection: "row",
     alignItems: "center",
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
   },
   backButtonText: {
     fontSize: 16,
@@ -743,6 +1028,16 @@ const styles = StyleSheet.create({
   brandText: {
     color: COLORS.primary500,
   },
+  headerRightContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  wsStatusIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
   timerWrapper: {
     flexDirection: "row",
     alignItems: "center",
@@ -752,10 +1047,10 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   timerText: {
-    fontSize: 16,
+    fontSize: 15,
     fontFamily: "Pretendard-Bold",
     color: COLORS.gray800,
-    marginLeft: 5,
+    marginLeft: 6,
   },
   timerWarning: {
     color: COLORS.danger500,
@@ -763,13 +1058,13 @@ const styles = StyleSheet.create({
   mainContent: {
     flex: 1,
     flexDirection: "row",
-    padding: 16,
-    gap: 16,
+    padding: 20,
+    gap: 20,
   },
   leftPanel: {
     flex: 3,
     backgroundColor: "#FFFFFF",
-    borderRadius: 10,
+    borderRadius: 12,
     overflow: "hidden",
     borderWidth: 1,
     borderColor: COLORS.gray200,
@@ -778,13 +1073,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     borderBottomWidth: 1,
     borderBottomColor: COLORS.gray200,
+    height: 52,
   },
   tab: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 12,
+    paddingVertical: 14,
     gap: 8,
   },
   activeTab: {
@@ -803,6 +1099,7 @@ const styles = StyleSheet.create({
   },
   paymentContent: {
     flex: 1,
+    padding: 20,
   },
   centerContentWrapper: {
     flex: 1,
@@ -811,73 +1108,83 @@ const styles = StyleSheet.create({
   },
   centerContent: {
     alignItems: "center",
-    paddingHorizontal: 16,
+    width: "100%",
+    maxWidth: 320,
   },
   qrContainer: {
     padding: 16,
     backgroundColor: "#FFFFFF",
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: COLORS.gray200,
-    marginBottom: 16,
+    marginBottom: 20,
   },
   instructionText: {
-    fontSize: 16,
+    fontSize: 17,
     fontFamily: "Pretendard-SemiBold",
     color: COLORS.gray900,
-    marginBottom: 6,
+    marginBottom: 12,
     textAlign: "center",
   },
   loadingText: {
     fontSize: 15,
     fontFamily: "Pretendard-Medium",
     color: COLORS.gray700,
-    marginTop: 12,
+    marginTop: 16,
   },
   subText: {
     fontSize: 14,
     fontFamily: "Pretendard-Regular",
     color: COLORS.gray600,
     textAlign: "center",
+    marginBottom: 20,
   },
   errorText: {
     fontSize: 15,
     fontFamily: "Pretendard-Medium",
     color: COLORS.danger500,
     textAlign: "center",
-    marginVertical: 10,
-    marginHorizontal: 12,
+    marginVertical: 14,
+    marginHorizontal: 16,
   },
   successText: {
-    fontSize: 16,
+    fontSize: 17,
     fontFamily: "Pretendard-SemiBold",
     color: COLORS.gray900,
-    marginTop: 12,
-    marginBottom: 6,
+    marginTop: 16,
+    marginBottom: 8,
     textAlign: "center",
   },
-  studentIdBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: COLORS.primary50,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
+  studentNumberContainer: {
     marginTop: 16,
+    marginBottom: 24,
+    alignItems: "center",
   },
-  studentIdBadgeText: {
-    fontSize: 16,
-    fontFamily: "Pretendard-SemiBold",
+  studentNumberDigits: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  studentNumberDigitBox: {
+    width: 44,
+    height: 52,
+    backgroundColor: COLORS.primary50,
+    borderRadius: 8,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  studentNumberDigit: {
+    fontSize: 22,
+    fontFamily: "Pretendard-Bold",
     color: COLORS.primary700,
   },
   digitBoxContainer: {
     flexDirection: "row",
-    marginVertical: 16,
-    gap: 10,
+    marginVertical: 18,
+    gap: 14,
   },
   digitBox: {
-    width: 42,
-    height: 52,
+    width: 44,
+    height: 56,
     borderBottomWidth: 2,
     borderBottomColor: COLORS.gray300,
     justifyContent: "center",
@@ -892,21 +1199,21 @@ const styles = StyleSheet.create({
     color: COLORS.gray900,
   },
   keypadContainer: {
-    marginBottom: 16,
+    marginBottom: 20,
   },
   keypadRow: {
     flexDirection: "row",
     justifyContent: "center",
-    marginBottom: 8,
-    gap: 8,
+    marginBottom: 10,
+    gap: 14,
   },
   keypadButton: {
-    width: 52,
-    height: 52,
+    width: 56,
+    height: 56,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: COLORS.gray50,
-    borderRadius: 8,
+    borderRadius: 10,
   },
   keypadActionButton: {
     backgroundColor: COLORS.gray200,
@@ -917,18 +1224,22 @@ const styles = StyleSheet.create({
     color: COLORS.gray900,
   },
   keypadActionText: {
-    fontSize: 12,
+    fontSize: 20,
     fontFamily: "Pretendard-Medium",
     color: COLORS.gray700,
   },
+  buttonsContainer: {
+    alignItems: "center",
+    width: "100%",
+  },
   submitButton: {
-    width: 180,
-    height: 44,
+    width: 220,
+    height: 48,
     backgroundColor: COLORS.primary500,
-    borderRadius: 8,
+    borderRadius: 10,
     justifyContent: "center",
     alignItems: "center",
-    marginTop: 8,
+    marginTop: 10,
   },
   disabledButton: {
     backgroundColor: COLORS.gray300,
@@ -942,17 +1253,19 @@ const styles = StyleSheet.create({
   rightPanel: {
     flex: 2,
     backgroundColor: "#FFFFFF",
-    borderRadius: 10,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: COLORS.gray200,
     display: "flex",
     flexDirection: "column",
+    height: "100%",
   },
   orderHeader: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.gray200,
+    height: 52,
   },
   orderHeaderText: {
     fontSize: 15,
@@ -963,7 +1276,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   orderListContent: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 8,
   },
   orderItem: {
@@ -978,29 +1291,29 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Pretendard-Medium",
     color: COLORS.gray800,
-    marginRight: 8,
+    marginRight: 10,
   },
   orderItemDetails: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: 14,
   },
   orderItemQuantity: {
     fontSize: 14,
     fontFamily: "Pretendard-Regular",
     color: COLORS.gray600,
     textAlign: "right",
-    minWidth: 30,
+    minWidth: 28,
   },
   orderItemPrice: {
     fontSize: 14,
     fontFamily: "Pretendard-SemiBold",
     color: COLORS.gray900,
     textAlign: "right",
-    minWidth: 70,
+    minWidth: 76,
   },
   orderFooter: {
-    padding: 16,
+    padding: 20,
     borderTopWidth: 1,
     borderTopColor: COLORS.gray200,
   },
@@ -1008,10 +1321,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 16,
   },
   totalLabel: {
-    fontSize: 16,
+    fontSize: 15,
     fontFamily: "Pretendard-SemiBold",
     color: COLORS.gray800,
   },
@@ -1021,31 +1334,89 @@ const styles = StyleSheet.create({
     color: COLORS.primary500,
   },
   cancelButton: {
-    height: 44,
-    backgroundColor: COLORS.gray50,
-    borderWidth: 1,
-    borderColor: COLORS.danger100,
-    borderRadius: 8,
+    height: 48,
+    backgroundColor: COLORS.danger500,
+    borderRadius: 10,
     justifyContent: "center",
     alignItems: "center",
   },
-  cancelText: {
+  cancelButtonText: {
     fontSize: 15,
     fontFamily: "Pretendard-SemiBold",
-    color: COLORS.danger500,
+    color: "#FFFFFF",
   },
   actionButton: {
     backgroundColor: COLORS.primary500,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    marginTop: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    marginTop: 14,
   },
   retryButton: {
     backgroundColor: COLORS.primary500,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    minWidth: 150,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  notificationContainer: {
+    position: "absolute",
+    top: 16,
+    left: "50%",
+    marginLeft: -160,
+    width: 320,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    marginTop: 12,
+    paddingHorizontal: 14,
+    zIndex: 1000,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  notificationSuccess: {
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.success500,
+  },
+  notificationError: {
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.danger500,
+  },
+  notificationInfo: {
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.primary500,
+  },
+  notificationContent: {
+    flex: 1,
+    marginLeft: 10,
+  },
+  notificationText: {
+    fontSize: 14,
+    fontFamily: "Pretendard-SemiBold",
+    color: COLORS.gray900,
+  },
+  notificationSubText: {
+    fontSize: 12,
+    fontFamily: "Pretendard-Regular",
+    color: COLORS.gray600,
+    marginTop: 2,
+  },
+  notificationCloseButton: {
+    width: 26,
+    height: 26,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  notificationCloseText: {
+    fontSize: 22,
+    fontFamily: "Pretendard-Medium",
+    color: COLORS.gray600,
+    lineHeight: 26,
   },
 });

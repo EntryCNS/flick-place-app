@@ -3,141 +3,101 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import * as SecureStore from "expo-secure-store";
 
 interface AuthState {
-  accessToken: string | null;
-  isAuthenticated: boolean;
-  isInitialized: boolean;
-  isLoading: boolean;
+  token: string | null;
+  authenticated: boolean;
+  initialized: boolean;
+  loading: boolean;
   error: string | null;
 }
 
 interface AuthActions {
-  initialize: () => Promise<void>;
-  login: (accessToken: string) => Promise<void>;
-  logout: () => Promise<void>;
-  clearError: () => void;
+  init: () => Promise<void>;
+  signIn: (token: string) => Promise<void>;
+  signOut: () => Promise<void>;
+  resetError: () => void;
 }
 
 const secureStorage = {
   getItem: async (name: string): Promise<string | null> => {
     try {
       return await SecureStore.getItemAsync(name);
-    } catch (error) {
-      console.error("Error getting item from secure storage:", error);
+    } catch {
       return null;
     }
   },
   setItem: async (name: string, value: string): Promise<void> => {
-    try {
-      await SecureStore.setItemAsync(name, value);
-    } catch (error) {
-      console.error("Error setting item in secure storage:", error);
-      throw error;
-    }
+    await SecureStore.setItemAsync(name, value);
   },
   removeItem: async (name: string): Promise<void> => {
-    try {
-      await SecureStore.deleteItemAsync(name);
-    } catch (error) {
-      console.error("Error removing item from secure storage:", error);
-      throw error;
-    }
+    await SecureStore.deleteItemAsync(name);
   },
 };
 
 export const useAuthStore = create<AuthState & AuthActions>()(
   persist(
     (set, get) => ({
-      accessToken: null,
-      isAuthenticated: false,
-      isInitialized: false,
-      isLoading: false,
+      token: null,
+      authenticated: false,
+      initialized: false,
+      loading: false,
       error: null,
 
-      initialize: async () => {
+      init: async () => {
         try {
-          // 초기화 작업 중 상태
-          set({ isLoading: true, error: null });
+          set({ loading: true, error: null });
 
-          // hydration이 완료되었는지 확인 (persist가 스토리지에서 데이터를 불러온 후)
           const state = get();
-
-          // 토큰이 있으면 인증된 것으로 설정
-          if (state.accessToken) {
-            set({ isAuthenticated: true });
+          if (state.token) {
+            set({ authenticated: true });
           }
 
-          // 초기화 완료
-          set({ isInitialized: true, isLoading: false });
+          set({ initialized: true, loading: false });
         } catch (error) {
-          console.error("Auth initialization error:", error);
           set({
-            isInitialized: true,
-            isLoading: false,
-            error:
-              error instanceof Error
-                ? error.message
-                : "인증 초기화 중 오류가 발생했습니다",
+            initialized: true,
+            loading: false,
+            error: error instanceof Error ? error.message : "초기화 오류",
           });
         }
       },
 
-      login: async (accessToken) => {
+      signIn: async (token) => {
         try {
-          set({ isLoading: true, error: null });
-          set({
-            accessToken,
-            isAuthenticated: true,
-            isLoading: false,
-          });
+          set({ loading: true, error: null });
+          set({ token, authenticated: true, loading: false });
         } catch (error) {
-          console.error("Login error:", error);
           set({
-            isLoading: false,
-            error:
-              error instanceof Error
-                ? error.message
-                : "로그인 중 오류가 발생했습니다",
+            loading: false,
+            error: error instanceof Error ? error.message : "로그인 오류",
           });
           throw error;
         }
       },
 
-      logout: async () => {
+      signOut: async () => {
         try {
-          set({ isLoading: true, error: null });
-          set({
-            accessToken: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
+          set({ loading: true, error: null });
+          set({ token: null, authenticated: false, loading: false });
         } catch (error) {
-          console.error("Logout error:", error);
           set({
-            isLoading: false,
-            error:
-              error instanceof Error
-                ? error.message
-                : "로그아웃 중 오류가 발생했습니다",
+            loading: false,
+            error: error instanceof Error ? error.message : "로그아웃 오류",
           });
           throw error;
         }
       },
 
-      clearError: () => {
-        set({ error: null });
-      },
+      resetError: () => set({ error: null }),
     }),
     {
-      name: "kiosk-auth-storage",
+      name: "kiosk-auth",
       storage: createJSONStorage(() => secureStorage),
       onRehydrateStorage: () => (state) => {
         if (state) {
-          state.initialize();
+          state.init();
         }
       },
-      partialize: (state) => ({
-        accessToken: state.accessToken,
-      }),
+      partialize: (state) => ({ token: state.token }),
     }
   )
 );

@@ -1,14 +1,18 @@
 import { useAuthStore } from "@/stores/auth";
 import { Redirect, Stack } from "expo-router";
 import { useFonts } from "expo-font";
-import React from "react";
-import { ActivityIndicator, StyleSheet, View } from "react-native";
+import React, { useEffect } from "react";
+import { StyleSheet, View } from "react-native";
 import Toast from "react-native-toast-message";
 import { COLORS } from "@/constants/colors";
+import * as SplashScreen from "expo-splash-screen";
+import * as KeepAwake from "expo-keep-awake";
+import Providers from "@/components/providers";
+
+SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
-  const { isAuthenticated } = useAuthStore();
-
+  const { authenticated, initialized } = useAuthStore();
   const [fontsLoaded] = useFonts({
     "Pretendard-Thin": require("../assets/fonts/Pretendard-Thin.otf"),
     "Pretendard-ExtraLight": require("../assets/fonts/Pretendard-ExtraLight.otf"),
@@ -21,41 +25,49 @@ export default function RootLayout() {
     "Pretendard-Black": require("../assets/fonts/Pretendard-Black.otf"),
   });
 
-  if (!fontsLoaded) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary600} />
-      </View>
-    );
+  useEffect(() => {
+    KeepAwake.activateKeepAwakeAsync();
+
+    if (fontsLoaded && initialized) {
+      SplashScreen.hideAsync();
+    }
+
+    return () => {
+      KeepAwake.deactivateKeepAwake();
+    };
+  }, [fontsLoaded, initialized]);
+
+  if (!fontsLoaded || !initialized) {
+    return null;
   }
 
   return (
-    <View style={styles.container}>
-      {isAuthenticated ? (
-        <Redirect href="/products" />
-      ) : (
-        <Redirect href="/(auth)" />
-      )}
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(auth)" options={{ animation: "fade" }} />
-        <Stack.Screen name="products" options={{ animation: "fade" }} />
-        <Stack.Screen name="payment" />
-        <Stack.Screen name="payment-complete" />
-        <Stack.Screen name="+not-found" options={{ title: "Not Found" }} />
-      </Stack>
-      <Toast />
-    </View>
+    <Providers>
+      <View style={styles.container}>
+        {authenticated ? (
+          <Redirect href="/products" />
+        ) : (
+          <Redirect href="/(auth)" />
+        )}
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="(auth)" options={{ animation: "fade" }} />
+          <Stack.Screen name="products" options={{ animation: "fade" }} />
+          <Stack.Screen name="payment" options={{ gestureEnabled: false }} />
+          <Stack.Screen
+            name="payment-complete"
+            options={{ gestureEnabled: false }}
+          />
+          <Stack.Screen name="+not-found" options={{ title: "Not Found" }} />
+        </Stack>
+        <Toast />
+      </View>
+    </Providers>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
     backgroundColor: COLORS.white,
   },
 });

@@ -10,9 +10,9 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const { accessToken } = useAuthStore.getState();
-  if (accessToken) {
-    config.headers["Authorization"] = `Bearer ${accessToken}`;
+  const { token } = useAuthStore.getState();
+  if (token) {
+    config.headers["Authorization"] = `Bearer ${token}`;
   }
 
   return config;
@@ -22,7 +22,7 @@ api.interceptors.response.use(
   (response) => response,
   async (error) => {
     if (error.response?.status === 401) {
-      useAuthStore.getState().logout();
+      useAuthStore.getState().signOut();
     }
     return Promise.reject(error);
   }
