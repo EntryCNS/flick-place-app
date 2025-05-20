@@ -50,17 +50,21 @@ const loginSchema = z.object({
 
 type LoginFormData = z.infer<typeof loginSchema>;
 
-export default function LoginScreen() {
+export default function LoginScreen(): React.ReactElement {
   const { signIn } = useAuthStore();
   const { clearCart } = useCartStore();
   const { resetPayment } = usePaymentStore();
   const [focusedField, setFocusedField] = useState<string | null>(null);
-  const [dimensions, setDimensions] = useState(Dimensions.get("window"));
+  const [dimensions, setDimensions] = useState<{
+    width: number;
+    height: number;
+  }>(Dimensions.get("window"));
 
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(12)).current;
-  const errorFadeAnim = useRef(new Animated.Value(0)).current;
-  const buttonScaleAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef<Animated.Value>(new Animated.Value(0)).current;
+  const slideAnim = useRef<Animated.Value>(new Animated.Value(12)).current;
+  const errorFadeAnim = useRef<Animated.Value>(new Animated.Value(0)).current;
+  const buttonScaleAnim = useRef<Animated.Value>(new Animated.Value(1)).current;
+  const isMounted = useRef<boolean>(true);
 
   const {
     control,
@@ -81,16 +85,24 @@ export default function LoginScreen() {
   const passwordRef = useRef<TextInput>(null);
 
   useEffect(() => {
+    isMounted.current = true;
+
     const subscription = Dimensions.addEventListener("change", ({ window }) => {
-      setDimensions(window);
+      if (isMounted.current) {
+        setDimensions(window);
+      }
     });
-    return () => subscription.remove();
+
+    return () => {
+      isMounted.current = false;
+      subscription.remove();
+    };
   }, []);
 
   const isLandscape = dimensions.width > dimensions.height;
 
   useEffect(() => {
-    Animated.parallel([
+    const animation = Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
         duration: 350,
@@ -101,19 +113,34 @@ export default function LoginScreen() {
         duration: 350,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+
+    animation.start();
+
+    return () => {
+      animation.stop();
+    };
   }, [fadeAnim, slideAnim]);
 
   useEffect(() => {
+    let animation: Animated.CompositeAnimation | null = null;
+
     if (errors.root?.message) {
-      Animated.timing(errorFadeAnim, {
+      animation = Animated.timing(errorFadeAnim, {
         toValue: 1,
         duration: 250,
         useNativeDriver: true,
-      }).start();
+      });
+      animation.start();
     } else {
       errorFadeAnim.setValue(0);
     }
+
+    return () => {
+      if (animation) {
+        animation.stop();
+      }
+    };
   }, [errors.root?.message, errorFadeAnim]);
 
   const loginMutation = useMutation({
@@ -124,26 +151,40 @@ export default function LoginScreen() {
       });
       return response.data;
     },
-    onSuccess: async (data) => {
+    onSuccess: async (data: { accessToken?: string }) => {
+      if (!isMounted.current) return;
+
       if (data?.accessToken) {
         await signIn(data.accessToken);
         clearCart();
         resetPayment();
-        router.replace("/products");
+
+        if (isMounted.current) {
+          router.replace("/products");
+        }
       } else {
-        setError("root", { message: "로그인에 실패했습니다" });
+        if (isMounted.current) {
+          setError("root", { message: "로그인에 실패했습니다" });
+        }
       }
     },
-    onError: (error) => {
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data as ErrorResponse;
+    onError: (error: unknown) => {
+      if (!isMounted.current) return;
 
-        if (errorData.code === "BOOTH_PASSWORD_NOT_MATCH") {
-          setError("password", { message: ERROR_CODES[errorData.code] });
-          setFocus("password");
-        } else if (errorData.code && errorData.code in ERROR_CODES) {
-          setError("root", { message: ERROR_CODES[errorData.code] });
-        } else {
+      if (isAxiosError(error) && error.response?.data) {
+        try {
+          const errorData = error.response.data as ErrorResponse;
+
+          if (errorData.code === "BOOTH_PASSWORD_NOT_MATCH") {
+            setError("password", { message: ERROR_CODES[errorData.code] });
+            setFocus("password");
+          } else if (errorData.code && errorData.code in ERROR_CODES) {
+            setError("root", { message: ERROR_CODES[errorData.code] });
+          } else {
+            setError("root", { message: "로그인에 실패했습니다" });
+          }
+        } catch (e) {
+          console.error("Error parsing response:", e);
           setError("root", { message: "로그인에 실패했습니다" });
         }
       } else {
@@ -164,6 +205,8 @@ export default function LoginScreen() {
 
   const onSubmit = useCallback(
     (data: LoginFormData) => {
+      if (!isMounted.current) return;
+
       Keyboard.dismiss();
       loginMutation.mutate(data);
     },
@@ -171,18 +214,24 @@ export default function LoginScreen() {
   );
 
   const goToQrScanner = useCallback(() => {
+    if (!isMounted.current) return;
     if (loginMutation.isPending) return;
+
     Keyboard.dismiss();
     clearErrors();
     router.push("/(auth)/qr");
   }, [loginMutation.isPending, clearErrors]);
 
   const handleFieldFocus = useCallback((fieldName: string) => {
-    setFocusedField(fieldName);
+    if (isMounted.current) {
+      setFocusedField(fieldName);
+    }
   }, []);
 
   const handleFieldBlur = useCallback(() => {
-    setFocusedField(null);
+    if (isMounted.current) {
+      setFocusedField(null);
+    }
   }, []);
 
   const handlePressIn = useCallback(() => {
@@ -200,16 +249,6 @@ export default function LoginScreen() {
       useNativeDriver: true,
     }).start();
   }, [buttonScaleAnim]);
-
-  const handleAutoFocus = useCallback(() => {
-    setTimeout(() => {
-      usernameRef.current?.focus();
-    }, 800);
-  }, []);
-
-  useEffect(() => {
-    handleAutoFocus();
-  }, [handleAutoFocus]);
 
   return (
     <KeyboardAvoidingView
@@ -300,7 +339,9 @@ export default function LoginScreen() {
                           handleFieldBlur();
                         }}
                         onFocus={() => handleFieldFocus("username")}
-                        onSubmitEditing={() => setFocus("password")}
+                        onSubmitEditing={() =>
+                          isMounted.current && setFocus("password")
+                        }
                         returnKeyType="next"
                         autoCapitalize="none"
                         blurOnSubmit={false}

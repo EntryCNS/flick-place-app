@@ -26,12 +26,13 @@ interface QRRegistrationResponse {
   accessToken: string;
 }
 
-export default function QrScannerScreen() {
+export default function QrScannerScreen(): React.ReactElement {
   const { signIn } = useAuthStore();
   const [permission, requestPermission] = useCameraPermissions();
 
-  const isMounted = useRef(true);
-  const canScan = useRef(true);
+  const isMounted = useRef<boolean>(true);
+  const canScan = useRef<boolean>(true);
+  const resetTimerRef = useRef<number | null>(null);
 
   const registerMutation = useMutation({
     mutationFn: async (token: string) => {
@@ -47,12 +48,15 @@ export default function QrScannerScreen() {
 
       if (data?.accessToken) {
         await signIn(data.accessToken);
-        router.replace("/products");
+        if (isMounted.current) {
+          router.replace("/products");
+        }
       } else {
         resetScanState();
       }
     },
-    onError: () => {
+    onError: (error) => {
+      console.error("Registration error:", error);
       if (isMounted.current) {
         resetScanState();
       }
@@ -60,7 +64,9 @@ export default function QrScannerScreen() {
   });
 
   useEffect(() => {
+    isMounted.current = true;
     StatusBar.setBarStyle("light-content");
+
     const backHandler = BackHandler.addEventListener(
       "hardwareBackPress",
       () => registerMutation.isPending
@@ -69,20 +75,42 @@ export default function QrScannerScreen() {
     return () => {
       StatusBar.setBarStyle("dark-content");
       isMounted.current = false;
+
+      if (resetTimerRef.current) {
+        clearTimeout(resetTimerRef.current);
+        resetTimerRef.current = null;
+      }
+
+      if (registerMutation.isPending) {
+        registerMutation.reset();
+      }
+
       backHandler.remove();
     };
-  }, [registerMutation.isPending]);
+  }, [registerMutation]);
 
   const resetScanState = useCallback(() => {
-    setTimeout(() => {
-      if (isMounted.current) canScan.current = true;
+    if (resetTimerRef.current) {
+      clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = null;
+    }
+
+    resetTimerRef.current = setTimeout(() => {
+      if (isMounted.current) {
+        canScan.current = true;
+      }
     }, 1000);
   }, []);
 
   const handleQRScanned = useCallback(
     ({ data }: BarcodeScanningResult) => {
-      if (registerMutation.isPending || !isMounted.current || !canScan.current)
+      if (
+        registerMutation.isPending ||
+        !isMounted.current ||
+        !canScan.current
+      ) {
         return;
+      }
 
       canScan.current = false;
 
@@ -97,7 +125,7 @@ export default function QrScannerScreen() {
   );
 
   const goBack = useCallback(() => {
-    if (registerMutation.isPending) return;
+    if (!isMounted.current || registerMutation.isPending) return;
     router.back();
   }, [registerMutation.isPending]);
 
@@ -131,45 +159,7 @@ export default function QrScannerScreen() {
             onPress={isBlocked ? goBack : requestPermission}
           >
             <Text style={styles.buttonText}>
-              {isBlocked ? "돌아가기" : "권한 요청하기"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!permission) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="dark-content" />
-        <Header onBack={goBack} />
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={COLORS.primary500} />
-          <Text style={styles.message}>카메라 권한을 확인하는 중입니다</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!permission.granted) {
-    const isBlocked = permission && !permission.canAskAgain;
-
-    return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="dark-content" />
-        <Header onBack={goBack} />
-        <View style={styles.center}>
-          <Text style={styles.title}>카메라 권한이 필요합니다</Text>
-          <Text style={styles.message}>
-            QR 코드를 스캔하려면 카메라 접근 권한이 필요합니다
-          </Text>
-          <TouchableOpacity
-            style={styles.button}
-            onPress={isBlocked ? goBack : requestPermission}
-          >
-            <Text style={styles.buttonText}>
-              {isBlocked ? "돌아가기" : "권한 요청하기"}
+              {isBlocked ? "돌아가기" : "다음"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -219,7 +209,11 @@ export default function QrScannerScreen() {
   );
 }
 
-function Header({ onBack }: { onBack: () => void }) {
+interface HeaderProps {
+  onBack: () => void;
+}
+
+function Header({ onBack }: HeaderProps): React.ReactElement {
   return (
     <View style={styles.header}>
       <TouchableOpacity style={styles.backButton} onPress={onBack}>
@@ -231,13 +225,15 @@ function Header({ onBack }: { onBack: () => void }) {
   );
 }
 
+interface HeaderLightProps {
+  onBack: () => void;
+  disabled?: boolean;
+}
+
 function HeaderLight({
   onBack,
   disabled = false,
-}: {
-  onBack: () => void;
-  disabled?: boolean;
-}) {
+}: HeaderLightProps): React.ReactElement {
   return (
     <View style={styles.header}>
       <TouchableOpacity

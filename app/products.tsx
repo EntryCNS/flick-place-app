@@ -13,11 +13,12 @@ import {
   TouchableOpacity,
   View,
   Platform,
+  GestureResponderEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { COLORS } from "@/constants/colors";
 import { API_URL } from "@/constants/api";
-import axios, { isAxiosError } from "axios";
+import { isAxiosError } from "axios";
 import { useAuthStore } from "@/stores/auth";
 import { useCartStore } from "@/stores/cart";
 import { usePaymentStore } from "@/stores/payment";
@@ -64,7 +65,6 @@ export default function ProductsScreen() {
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertMessage, setAlertMessage] = useState("");
   const alertOpacity = useRef(new Animated.Value(0)).current;
-  const alertTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const queryClient = useQueryClient();
   const { signOut } = useAuthStore();
@@ -98,7 +98,7 @@ export default function ProductsScreen() {
 
   const orderMutation = useMutation({
     mutationFn: (orderRequest: CreateOrderRequest) => {
-      return axios.post(`${API_URL}/orders`, orderRequest, {
+      return api.post(`${API_URL}/orders`, orderRequest, {
         headers: {
           Authorization: `Bearer ${useAuthStore.getState().token}`,
         },
@@ -116,9 +116,13 @@ export default function ProductsScreen() {
       let errorMessage = "주문 처리에 실패했습니다";
 
       if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        if (errorData?.code && ERROR_CODES[errorData.code]) {
-          errorMessage = ERROR_CODES[errorData.code];
+        try {
+          const errorData = error.response.data;
+          if (errorData?.code && ERROR_CODES[errorData.code]) {
+            errorMessage = ERROR_CODES[errorData.code];
+          }
+        } catch (e) {
+          console.error("Error parsing response:", e);
         }
       }
 
@@ -129,14 +133,8 @@ export default function ProductsScreen() {
 
   const showAlert = useCallback(
     (message: string) => {
-      if (alertTimerRef.current) {
-        clearTimeout(alertTimerRef.current);
-        alertTimerRef.current = null;
-      }
-
       setAlertMessage(message);
       setAlertVisible(true);
-
       alertOpacity.setValue(0);
 
       Animated.sequence([
@@ -242,6 +240,13 @@ export default function ProductsScreen() {
       updateQuantity(id, newQuantity);
     },
     [products, updateQuantity, showAlert]
+  );
+
+  const handleRefetch = useCallback(
+    (_event?: GestureResponderEvent) => {
+      refetch();
+    },
+    [refetch]
   );
 
   const renderProductItem = useCallback(
@@ -402,7 +407,7 @@ export default function ProductsScreen() {
               <Text style={styles.errorText}>상품을 불러올 수 없습니다</Text>
               <TouchableOpacity
                 style={styles.retryButton}
-                onPress={() => refetch()}
+                onPress={handleRefetch}
                 activeOpacity={0.7}
               >
                 <Text style={styles.retryButtonText}>다시 시도</Text>
@@ -419,7 +424,7 @@ export default function ProductsScreen() {
               refreshControl={
                 <RefreshControl
                   refreshing={isRefetching}
-                  onRefresh={() => refetch()}
+                  onRefresh={handleRefetch}
                   colors={[COLORS.primary600]}
                   tintColor={COLORS.primary600}
                 />
@@ -435,7 +440,7 @@ export default function ProductsScreen() {
               {cart.length > 0 && (
                 <TouchableOpacity
                   style={styles.clearButton}
-                  onPress={() => clearCart()}
+                  onPress={clearCart}
                   activeOpacity={0.7}
                 >
                   <Ionicons

@@ -1,5 +1,5 @@
 import { router } from "expo-router";
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import {
   Image,
   SafeAreaView,
@@ -12,27 +12,44 @@ import { COLORS } from "@/constants/colors";
 import { useCartStore } from "@/stores/cart";
 import { usePaymentStore } from "@/stores/payment";
 
-export default function PaymentComplete() {
+export default function PaymentComplete(): React.ReactElement {
   const { getTotalAmount, clearCart } = useCartStore();
   const { orderId, resetPayment } = usePaymentStore();
 
+  const autoRedirectTimerRef = useRef<number | null>(null);
+  const isMounted = useRef<boolean>(true);
+
   const handleGoToMenu = useCallback(() => {
+    if (!isMounted.current) return;
+
     resetPayment();
     clearCart();
     router.replace("/products");
   }, [clearCart, resetPayment]);
 
   useEffect(() => {
+    isMounted.current = true;
+
     if (!orderId) {
-      router.replace("/products");
+      if (isMounted.current) {
+        router.replace("/products");
+      }
       return;
     }
 
-    const autoRedirectTimer = setTimeout(() => {
-      handleGoToMenu();
+    autoRedirectTimerRef.current = setTimeout(() => {
+      if (isMounted.current) {
+        handleGoToMenu();
+      }
     }, 10000);
 
-    return () => clearTimeout(autoRedirectTimer);
+    return () => {
+      isMounted.current = false;
+      if (autoRedirectTimerRef.current) {
+        clearTimeout(autoRedirectTimerRef.current);
+        autoRedirectTimerRef.current = null;
+      }
+    };
   }, [handleGoToMenu, orderId]);
 
   return (

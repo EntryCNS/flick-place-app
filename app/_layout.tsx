@@ -1,7 +1,7 @@
 import { useAuthStore } from "@/stores/auth";
 import { Redirect, Stack } from "expo-router";
 import { useFonts } from "expo-font";
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { StyleSheet, View } from "react-native";
 import Toast from "react-native-toast-message";
 import { COLORS } from "@/constants/colors";
@@ -9,10 +9,12 @@ import * as SplashScreen from "expo-splash-screen";
 import * as KeepAwake from "expo-keep-awake";
 import Providers from "@/components/providers";
 
-SplashScreen.preventAutoHideAsync();
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
-export default function RootLayout() {
+export default function RootLayout(): React.ReactElement | null {
   const { authenticated, initialized } = useAuthStore();
+  const isMounted = useRef<boolean>(true);
+
   const [fontsLoaded] = useFonts({
     "Pretendard-Thin": require("../assets/fonts/Pretendard-Thin.otf"),
     "Pretendard-ExtraLight": require("../assets/fonts/Pretendard-ExtraLight.otf"),
@@ -26,15 +28,21 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
+    isMounted.current = true;
     KeepAwake.activateKeepAwakeAsync();
 
-    if (fontsLoaded && initialized) {
-      SplashScreen.hideAsync();
-    }
-
     return () => {
+      isMounted.current = false;
       KeepAwake.deactivateKeepAwake();
     };
+  }, []);
+
+  useEffect(() => {
+    if (fontsLoaded && initialized && isMounted.current) {
+      SplashScreen.hideAsync().catch((error) => {
+        console.error("Failed to hide splash screen:", error);
+      });
+    }
   }, [fontsLoaded, initialized]);
 
   if (!fontsLoaded || !initialized) {

@@ -1,7 +1,7 @@
 import { COLORS } from "@/constants/colors";
 import { Ionicons } from "@expo/vector-icons";
 import { router, usePathname } from "expo-router";
-import React from "react";
+import React, { useCallback, useRef, useEffect } from "react";
 import {
   SafeAreaView,
   StyleSheet,
@@ -10,8 +10,21 @@ import {
   View,
 } from "react-native";
 
-export default function NotFound() {
+export default function NotFound(): React.ReactElement {
   const pathname = usePathname();
+  const isMounted = useRef<boolean>(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+    };
+  }, []);
+
+  const handleNavigateToHome = useCallback(() => {
+    if (!isMounted.current) return;
+    router.replace("/products");
+  }, []);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -27,7 +40,8 @@ export default function NotFound() {
         </Text>
         <TouchableOpacity
           style={styles.button}
-          onPress={() => router.replace("/products")}
+          onPress={handleNavigateToHome}
+          activeOpacity={0.7}
         >
           <Text style={styles.buttonText}>메인으로 돌아가기</Text>
         </TouchableOpacity>
@@ -49,12 +63,13 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 24,
-    fontWeight: "bold",
+    fontFamily: "Pretendard-Bold",
     marginTop: 20,
     color: COLORS.secondary800,
   },
   message: {
     fontSize: 16,
+    fontFamily: "Pretendard-Medium",
     textAlign: "center",
     marginTop: 10,
     marginBottom: 30,
@@ -69,6 +84,6 @@ const styles = StyleSheet.create({
   buttonText: {
     color: COLORS.secondary50,
     fontSize: 16,
-    fontWeight: "bold",
+    fontFamily: "Pretendard-Bold",
   },
 });

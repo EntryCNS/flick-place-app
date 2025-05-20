@@ -12,6 +12,7 @@ import {
   ActivityIndicator,
   Animated,
   FlatList,
+  ListRenderItem,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -42,7 +43,12 @@ interface NotificationType {
   submessage?: string;
 }
 
-const ERROR_MESSAGES = {
+interface ErrorResponse {
+  code?: string;
+  message?: string;
+}
+
+const ERROR_MESSAGES: Record<string, string> = {
   ORDER_NOT_FOUND: "주문을 찾을 수 없습니다",
   ORDER_NOT_PENDING: "이미 처리된 주문입니다",
   USER_NOT_FOUND: "등록되지 않은 학번입니다",
@@ -53,7 +59,7 @@ const NOTIFICATION_DURATION = 3000;
 const WS_RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 3;
 
-export default function PaymentScreen() {
+export default function PaymentScreen(): React.ReactElement {
   const { items: cart, getTotalAmount, clearCart } = useCartStore();
   const {
     orderId,
@@ -80,16 +86,13 @@ export default function PaymentScreen() {
   );
   const [wsStatus, setWsStatus] = useState<WebSocketStatus>("DISCONNECTED");
 
+  const isMounted = useRef<boolean>(true);
   const wsReconnectAttemptsRef = useRef<number>(0);
   const timerAnimValue = useRef(new Animated.Value(1)).current;
   const webSocketRef = useRef<WebSocket | null>(null);
-  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const notificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
-  const wsReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+  const timerIntervalRef = useRef<number | null>(null);
+  const notificationTimeoutRef = useRef<number | null>(null);
+  const wsReconnectTimeoutRef = useRef<number | null>(null);
 
   const cancelOrderMutation = useMutation({
     mutationFn: async () => {
@@ -99,22 +102,26 @@ export default function PaymentScreen() {
       return null;
     },
     onError: (error) => {
+      if (!isMounted.current) return;
+
       let message = "주문 취소 중 오류가 발생했습니다";
 
       if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        if (
-          errorData?.code &&
-          ERROR_MESSAGES[errorData.code as keyof typeof ERROR_MESSAGES]
-        ) {
-          message =
-            ERROR_MESSAGES[errorData.code as keyof typeof ERROR_MESSAGES];
+        try {
+          const errorData = error.response.data as ErrorResponse;
+          if (errorData.code && ERROR_MESSAGES[errorData.code]) {
+            message = ERROR_MESSAGES[errorData.code];
+          }
+        } catch (e) {
+          console.error("Error parsing response:", e);
         }
       }
 
       showNotification("error", message);
     },
     onSettled: () => {
+      if (!isMounted.current) return;
+
       cancelPayment();
       clearCart();
       router.replace("/products");
@@ -128,6 +135,8 @@ export default function PaymentScreen() {
       return response.data;
     },
     onSuccess: (data) => {
+      if (!isMounted.current) return;
+
       setPaymentRequest(
         data.id,
         data.token || "",
@@ -137,15 +146,26 @@ export default function PaymentScreen() {
       );
     },
     onError: (error) => {
+      if (!isMounted.current) return;
+
       let errorMsg = "결제 요청을 생성할 수 없습니다";
-      let code = null;
+      let code: string | null = null;
 
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        code = errorData?.code;
-
-        if (code && ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES]) {
-          errorMsg = ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES];
+      if (isAxiosError(error)) {
+        if (error.response?.data) {
+          try {
+            const errorData = error.response.data as ErrorResponse;
+            if (errorData.code) {
+              code = errorData.code;
+              if (ERROR_MESSAGES[code]) {
+                errorMsg = ERROR_MESSAGES[code];
+              }
+            }
+          } catch (e) {
+            console.error("Error parsing response:", e);
+          }
+        } else if (error.code === "ECONNABORTED") {
+          errorMsg = "서버 응답 시간 초과";
         }
       }
 
@@ -165,6 +185,8 @@ export default function PaymentScreen() {
       return response.data;
     },
     onSuccess: (data) => {
+      if (!isMounted.current) return;
+
       setPaymentRequest(
         data.id,
         data.token || studentId,
@@ -176,15 +198,26 @@ export default function PaymentScreen() {
       showNotification("success", "학번 결제 요청 완료");
     },
     onError: (error) => {
+      if (!isMounted.current) return;
+
       let errorMsg = "결제 요청에 실패했습니다";
-      let code = null;
+      let code: string | null = null;
 
-      if (isAxiosError(error) && error.response?.data) {
-        const errorData = error.response.data;
-        code = errorData?.code;
-
-        if (code && ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES]) {
-          errorMsg = ERROR_MESSAGES[code as keyof typeof ERROR_MESSAGES];
+      if (isAxiosError(error)) {
+        if (error.response?.data) {
+          try {
+            const errorData = error.response.data as ErrorResponse;
+            if (errorData.code) {
+              code = errorData.code;
+              if (ERROR_MESSAGES[code]) {
+                errorMsg = ERROR_MESSAGES[code];
+              }
+            }
+          } catch (e) {
+            console.error("Error parsing response:", e);
+          }
+        } else if (error.code === "ECONNABORTED") {
+          errorMsg = "서버 응답 시간 초과";
         }
       }
 
@@ -200,32 +233,52 @@ export default function PaymentScreen() {
       message: string,
       submessage?: string
     ) => {
+      if (!isMounted.current) return;
+
       if (notificationTimeoutRef.current) {
         clearTimeout(notificationTimeoutRef.current);
+        notificationTimeoutRef.current = null;
       }
 
       setNotification({ type, message, submessage });
 
       notificationTimeoutRef.current = setTimeout(() => {
-        setNotification(null);
+        if (isMounted.current) {
+          setNotification(null);
+        }
       }, NOTIFICATION_DURATION);
     },
     []
   );
 
   useEffect(() => {
+    isMounted.current = true;
+
     return () => {
+      isMounted.current = false;
+
       if (notificationTimeoutRef.current) {
         clearTimeout(notificationTimeoutRef.current);
+        notificationTimeoutRef.current = null;
       }
+
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
+
       if (wsReconnectTimeoutRef.current) {
         clearTimeout(wsReconnectTimeoutRef.current);
+        wsReconnectTimeoutRef.current = null;
       }
+
       if (webSocketRef.current) {
-        webSocketRef.current.close();
+        try {
+          webSocketRef.current.close();
+          webSocketRef.current = null;
+        } catch (e) {
+          console.error("Error closing WebSocket:", e);
+        }
       }
     };
   }, []);
@@ -258,20 +311,28 @@ export default function PaymentScreen() {
   }, [timer, timerAnimValue]);
 
   const handleCancel = useCallback(() => {
-    cancelOrderMutation.mutate();
+    if (isMounted.current) {
+      cancelOrderMutation.mutate();
+    }
   }, [cancelOrderMutation]);
 
   useEffect(() => {
     if (isActive && timer > 0) {
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
       }
-      timerIntervalRef.current = setInterval(decrementTimer, 1000);
-    } else if (timer <= 0 && isActive) {
+
+      timerIntervalRef.current = setInterval(() => {
+        if (isMounted.current) {
+          decrementTimer();
+        }
+      }, 1000);
+    } else if (timer <= 0 && isActive && isMounted.current) {
       handleCancel();
     }
 
-    if (status === "COMPLETED") {
+    if (status === "COMPLETED" && isMounted.current) {
       router.replace("/payment-complete");
     }
 
@@ -284,16 +345,14 @@ export default function PaymentScreen() {
   }, [isActive, timer, status, decrementTimer, handleCancel]);
 
   const connectWebSocket = useCallback(() => {
-    if (!requestId) return;
-
+    if (!requestId || !isMounted.current) return;
     if (wsStatus === "CONNECTING" || wsStatus === "CONNECTED") return;
 
     setWsStatus("CONNECTING");
 
-    const wsUrl = `${API_URL.replace(
-      "http",
-      "ws"
-    )}/ws/payment-requests/${requestId}`;
+    const wsUrl =
+      API_URL.replace(/^http(s?):\/\//, (_, s) => (s ? "wss://" : "ws://")) +
+      `/ws/payment-requests/${requestId}`;
 
     try {
       if (
@@ -307,11 +366,15 @@ export default function PaymentScreen() {
       webSocketRef.current = ws;
 
       ws.onopen = () => {
-        setWsStatus("CONNECTED");
-        wsReconnectAttemptsRef.current = 0;
+        if (isMounted.current) {
+          setWsStatus("CONNECTED");
+          wsReconnectAttemptsRef.current = 0;
+        }
       };
 
       ws.onmessage = (event) => {
+        if (!isMounted.current) return;
+
         try {
           const data = JSON.parse(event.data);
 
@@ -329,22 +392,30 @@ export default function PaymentScreen() {
             showNotification("error", "결제 시간이 초과되었습니다.");
             handleCancel();
           }
-        } catch {
-          console.error("웹소켓 메시지 처리 실패");
+        } catch (error) {
+          console.error("WebSocket message processing error:", error);
+          if (isMounted.current) {
+            setWsStatus("FAILED");
+          }
         }
       };
 
       ws.onerror = () => {
-        setWsStatus("FAILED");
+        if (isMounted.current) {
+          setWsStatus("FAILED");
+        }
       };
 
       ws.onclose = (event) => {
+        if (!isMounted.current) return;
+
         if (!event.wasClean) {
           setWsStatus("DISCONNECTED");
 
           if (
             wsReconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS &&
-            requestId
+            requestId &&
+            isMounted.current
           ) {
             const delay = Math.min(
               WS_RECONNECT_DELAY * (wsReconnectAttemptsRef.current + 1),
@@ -353,55 +424,63 @@ export default function PaymentScreen() {
 
             if (wsReconnectTimeoutRef.current) {
               clearTimeout(wsReconnectTimeoutRef.current);
+              wsReconnectTimeoutRef.current = null;
             }
 
             wsReconnectTimeoutRef.current = setTimeout(() => {
-              wsReconnectAttemptsRef.current += 1;
-              connectWebSocket();
+              if (isMounted.current) {
+                wsReconnectAttemptsRef.current += 1;
+                connectWebSocket();
+              }
             }, delay);
           } else {
             setWsStatus("FAILED");
           }
         }
       };
-    } catch {
-      setWsStatus("FAILED");
+    } catch (error) {
+      console.error("WebSocket connection error:", error);
+      if (isMounted.current) {
+        setWsStatus("FAILED");
+      }
     }
-  }, [requestId, showNotification, setStatus, handleCancel, wsStatus]);
+  }, [requestId, wsStatus, showNotification, handleCancel]);
 
   useEffect(() => {
-    let shouldConnect = false;
-
-    if (requestId && wsStatus !== "CONNECTED") {
-      shouldConnect = true;
+    if (requestId && wsStatus !== "CONNECTED" && isMounted.current) {
+      connectWebSocket();
     } else if (!requestId) {
-      setWsStatus("DISCONNECTED");
+      if (isMounted.current) {
+        setWsStatus("DISCONNECTED");
+      }
 
       if (webSocketRef.current) {
-        webSocketRef.current.close();
+        try {
+          webSocketRef.current.close();
+          webSocketRef.current = null;
+        } catch (e) {
+          console.error("Error closing WebSocket:", e);
+        }
       }
 
       if (wsReconnectTimeoutRef.current) {
         clearTimeout(wsReconnectTimeoutRef.current);
+        wsReconnectTimeoutRef.current = null;
       }
-    }
-
-    if (shouldConnect) {
-      const timeoutId = setTimeout(() => {
-        connectWebSocket();
-      }, 0);
-
-      return () => clearTimeout(timeoutId);
     }
   }, [requestId, connectWebSocket, wsStatus]);
 
   const handleReconnectWebSocket = useCallback(() => {
-    wsReconnectAttemptsRef.current = 0;
-    connectWebSocket();
+    if (isMounted.current) {
+      wsReconnectAttemptsRef.current = 0;
+      connectWebSocket();
+    }
   }, [connectWebSocket]);
 
   const createQrPaymentRequest = useCallback(() => {
-    qrPaymentMutation.mutate();
+    if (isMounted.current) {
+      qrPaymentMutation.mutate();
+    }
   }, [qrPaymentMutation]);
 
   useEffect(() => {
@@ -409,7 +488,8 @@ export default function PaymentScreen() {
       selectedMethod === "QR_CODE" &&
       orderId &&
       !requestCode &&
-      !qrPaymentMutation.isPending
+      !qrPaymentMutation.isPending &&
+      isMounted.current
     ) {
       createQrPaymentRequest();
     }
@@ -426,7 +506,8 @@ export default function PaymentScreen() {
       if (
         selectedMethod !== method &&
         !qrPaymentMutation.isPending &&
-        !studentIdPaymentMutation.isPending
+        !studentIdPaymentMutation.isPending &&
+        isMounted.current
       ) {
         setSelectedMethod(method);
         setErrorMessage(null);
@@ -465,6 +546,8 @@ export default function PaymentScreen() {
   }, []);
 
   const handleStudentIdSubmit = useCallback(() => {
+    if (!isMounted.current) return;
+
     if (!validateStudentId(studentId)) {
       showNotification("info", "올바른 학번 형식이 아닙니다");
       return;
@@ -487,6 +570,8 @@ export default function PaymentScreen() {
   }, []);
 
   const handleRetry = useCallback(() => {
+    if (!isMounted.current) return;
+
     resetPaymentRequest();
     setErrorMessage(null);
     setErrorCode(null);
@@ -505,7 +590,11 @@ export default function PaymentScreen() {
         return (
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => router.replace("/products")}
+            onPress={() => {
+              if (isMounted.current) {
+                router.replace("/products");
+              }
+            }}
             activeOpacity={0.7}
           >
             <Text style={styles.buttonText}>상품 목록으로 돌아가기</Text>
@@ -524,8 +613,8 @@ export default function PaymentScreen() {
     }
   }, [errorCode, handleRetry]);
 
-  const renderCartItem = useCallback(
-    ({ item }: { item: CartItemType }) => (
+  const renderCartItem: ListRenderItem<CartItemType> = useCallback(
+    ({ item }) => (
       <View style={styles.orderItem}>
         <Text style={styles.orderItemName} numberOfLines={1}>
           {item.name}
@@ -543,6 +632,8 @@ export default function PaymentScreen() {
 
   const handleKeypadPress = useCallback(
     (value: string) => {
+      if (!isMounted.current) return;
+
       if (value === "delete") {
         setStudentId((prev) => prev.slice(0, -1));
       } else if (value === "clear") {
@@ -657,7 +748,7 @@ export default function PaymentScreen() {
           )}
         </View>
         <TouchableOpacity
-          onPress={() => setNotification(null)}
+          onPress={() => isMounted.current && setNotification(null)}
           style={styles.notificationCloseButton}
         >
           <Text style={styles.notificationCloseText}>×</Text>
@@ -842,7 +933,11 @@ export default function PaymentScreen() {
       <View style={styles.header}>
         <TouchableOpacity
           style={styles.backButton}
-          onPress={() => router.push("/products")}
+          onPress={() => {
+            if (isMounted.current && !isSubmitting) {
+              router.push("/products");
+            }
+          }}
           disabled={isSubmitting}
           activeOpacity={0.7}
         >
